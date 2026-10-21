@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0C2A3B">
+<meta name="description" content="Working SNI and bug hosts for VPN tunnelling, tested daily.">
+<title>Moon Radar | SNI and bug host scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top"><div class="top-in">
+  <a class="brand" href="/"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><path d="M20.5 15.8A8.6 8.6 0 0 1 10.2 5.5a8.6 8.6 0 1 0 10.3 10.3z" fill="currentColor"/><circle cx="19.5" cy="6.5" r="2" fill="#2F4BFF"/></svg>Moon Radar</a>
+  <nav class="main" aria-label="Main">
+    <a href="#/" data-nav="hosts">Hosts</a><a href="#/tools" data-nav="tools">Tools</a>
+  </nav>
+  <div class="status" id="status"></div>
+</div></header>
+<main id="app" aria-live="polite"></main>
+<dialog id="sheet"><div class="sheet" id="sheetBody"></div></dialog>
+<script src="/app.js"></script>
+</body>
+</html>

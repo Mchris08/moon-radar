@@ -1,0 +1,13 @@
+{
+  "name": "moon-radar",
+  "version": "1.0.0",
+  "description": "SNI / bug-host scanner for VPN tunneling with admin-reviewed Zimbabwe hosts, daily auto-testing, subdomain finder and payload generator. Zero dependencies.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run.js && node test/ui-smoke.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED",
+  "author": "Mchris devs"
+}
