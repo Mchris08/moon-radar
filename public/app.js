@@ -3,7 +3,7 @@
 const $ = s => document.querySelector(s);
 const app = $('#app');
 const ADMIN = !!document.querySelector('meta[name=radar-admin]');
-const state = { meta: null, filters: { country: null, carrier: '', type: '', sort: 'score', q: '' }, token: localStorage.getItem('radar_token') || '', toolsTab: 'subdomains', adminTab: 'review', jobTimer: null };
+const state = { meta: null, filters: { country: null, carrier: '', type: '', sort: 'score', q: '' }, token: localStorage.getItem('radar_token') || '', toolsTab: 'sni', adminTab: 'review', jobTimer: null };
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -160,12 +160,13 @@ $('#sheet').addEventListener('click', e => { if (e.target === $('#sheet')) $('#s
 
 // ---------- tools ----------
 function viewTools() {
+  const TABS = [['sni', 'SNI sniffer'], ['bulk', 'Bulk test'], ['check', 'Check host'], ['subdomains', 'Subdomains'], ['snicheck', 'SNI check'], ['dns', 'DNS'], ['ports', 'Ports'], ['convert', 'Converter'], ['payload', 'Payloads']];
   const wrap = h('div');
-  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Tool' }, [['subdomains', 'Subdomains'], ['check', 'Check host'], ['payload', 'Payloads']].map(([k, l]) => h('button', { 'aria-pressed': String(state.toolsTab === k), onclick: () => { state.toolsTab = k; viewTools(); } }, l)));
+  const bar = h('div', { class: 'tabs', role: 'group', 'aria-label': 'Tool' }, TABS.map(([k, l]) => h('button', { class: 'tab', 'aria-pressed': String(state.toolsTab === k), onclick: () => { state.toolsTab = k; viewTools(); } }, l)));
   const body = h('div');
-  wrap.append(seg, body);
+  wrap.append(bar, body);
   clear(app).append(wrap);
-  ({ subdomains: toolSubdomains, check: toolCheck, payload: toolPayload })[state.toolsTab](body);
+  ({ sni: toolSniff, snicheck: toolSniCheck, subdomains: toolSubdomains, check: toolCheck, bulk: toolBulk, dns: toolDns, ports: toolPorts, convert: toolConvert, payload: toolPayload })[state.toolsTab](body);
 }
 
 function toolCheck(body) {
@@ -250,6 +251,198 @@ function toolPayload(body) {
       h('button', { class: 'btn', onclick: () => { const u = crypto.randomUUID ? crypto.randomUUID() : ''; f.uuid = u; uuidInput.value = u; } }, 'New UUID')),
     h('p', { class: 'small muted' }, 'You bring the server (SSH, V2Ray or Xray). Radar builds the client side: the bug host goes into SNI and Host fields.')), out);
   if (f.host) go();
+}
+
+// ---------- more tools ----------
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const copyBlock = (title, text) => h('div', { class: 'blk' }, h('div', { class: 'blk-h' }, h('b', null, title), h('button', { class: 'btn sm', onclick: () => copy(text) }, 'Copy')), h('pre', { class: 'code' }, text));
+const statusChip = st => h('span', { class: 'chip ' + (st === 'open' ? 'ok' : st === 'closed' ? 'no' : '') }, st);
+
+function toolDns(body) {
+  const out = h('div');
+  const input = h('input', { type: 'text', placeholder: 'example.com or 8.8.8.8', autocapitalize: 'none', autocomplete: 'off', 'aria-label': 'Domain or IP address' });
+  const resolver = h('select', { 'aria-label': 'Resolver' }, [['system', "This device's DNS"], ['cloudflare', 'Cloudflare 1.1.1.1'], ['google', 'Google 8.8.8.8'], ['quad9', 'Quad9 9.9.9.9']].map(([v, l]) => h('option', { value: v }, l)));
+  const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'SOA', 'CAA'];
+  const on = new Set(['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT']);
+  const boxes = h('div', null, TYPES.map(t => h('label', { class: 'chip', style: 'cursor:pointer' }, h('input', { type: 'checkbox', checked: on.has(t), onchange: e => { e.target.checked ? on.add(t) : on.delete(t); } }), ' ' + t)));
+  const go = async () => {
+    clear(out).append(h('p', { class: 'muted' }, 'Looking up records'));
+    try {
+      const d = await api('/tools/dns', { method: 'POST', body: { name: input.value, types: [...on], resolver: resolver.value } });
+      const keys = [...new Set([...TYPES, 'PTR'])].filter(k => k in d.records || k in d.errors);
+      clear(out).append(h('div', { class: 'panel' }, h('b', { class: 'mono' }, d.name), h('div', { class: 'small muted' }, d.resolver === 'system' ? "Answered by this device's DNS" : 'Answered by ' + d.resolver),
+        d.note ? h('div', { class: 'notice' }, d.note) : null,
+        keys.map(k => h('div', { class: 'proto' }, h('b', null, k), d.errors[k] ? h('span', { class: 'err' }, 'Error: ' + d.errors[k]) : (d.records[k].length ? d.records[k].map(r => h('div', { class: 'mono small' }, r)) : h('span', { class: 'muted small' }, 'No records'))))));
+    } catch (e) { clear(out).append(h('div', { class: 'err' }, e.message)); }
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  body.append(h('div', { class: 'panel' }, h('label', { class: 'f' }, 'Domain or IP address'), input, h('label', { class: 'f' }, 'Resolver'), resolver, h('label', { class: 'f' }, 'Record types'), boxes,
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: go }, 'Look up')),
+    h('p', { class: 'small muted' }, "\"This device's DNS\" shows what your own network answers. Compare it with Cloudflare or Google to spot a carrier redirecting names.")), out);
+}
+
+function toolPorts(body) {
+  const out = h('div');
+  const input = h('input', { type: 'text', placeholder: 'example.com or an IP', autocapitalize: 'none', 'aria-label': 'Host' });
+  const ports = h('input', { type: 'text', value: '80,443', placeholder: '80,443,8000-8010', 'aria-label': 'Ports' });
+  const presets = [['Web', '80,443,8080,8443'], ['SSH and VPN', '22,443,1194,500,4500,1723'], ['Cloudflare', '443,2053,2083,2087,2096,8443'], ['Common', '21,22,25,53,80,110,143,443,993,995,3306,8080,8443']];
+  const go = async () => {
+    clear(out).append(h('p', { class: 'muted' }, 'Checking ports. Closed ones answer fast, filtered ones take a few seconds.'));
+    try {
+      const d = await api('/tools/ports', { method: 'POST', body: { host: input.value, ports: ports.value } });
+      clear(out).append(h('div', { class: 'panel' }, h('b', { class: 'mono' }, d.host), h('div', { class: 'small muted' }, 'IP ' + d.ip),
+        h('table', { class: 't' }, d.results.map(r => h('tr', null, h('td', { class: 'mono' }, String(r.port)), h('td', null, r.service || ''), h('td', null, statusChip(r.status)), h('td', { class: 'muted small' }, r.status === 'open' ? r.ms + ' ms' : ''), h('td', { class: 'mono small' }, r.banner || ''))))));
+    } catch (e) { clear(out).append(h('div', { class: 'err' }, e.message)); }
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  body.append(h('div', { class: 'panel' }, h('label', { class: 'f' }, 'Host'), input, h('label', { class: 'f' }, 'Ports (up to 30)'), ports,
+    h('div', null, presets.map(([l, v]) => h('button', { class: 'btn sm', style: 'margin:6px 6px 0 0', onclick: () => { ports.value = v; } }, l))),
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: go }, 'Check ports')),
+    h('p', { class: 'small muted' }, 'Open means something answered. Closed means the host refused. Filtered means no answer, usually a firewall. Private addresses are blocked.')), out);
+}
+
+function toolBulk(body) {
+  const ta = h('textarea', { placeholder: 'host1.example.com\nhost2.example.com', 'aria-label': 'Hosts to test' });
+  const out = h('div');
+  let stop = false;
+  const go = async () => {
+    const names = [...new Set(ta.value.split(/[\s,;]+/).map(x => x.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0]).filter(Boolean))].slice(0, 300);
+    if (!names.length) { clear(out).append(h('div', { class: 'err' }, 'Paste at least one host')); return; }
+    stop = false;
+    const size = state.token ? 30 : 10;
+    const results = [];
+    const prog = h('i');
+    const sumEl = h('div', { class: 'small muted' });
+    const list = h('div', { class: 'ledger' });
+    const stopBtn = h('button', { class: 'btn danger sm', onclick: () => { stop = true; } }, 'Stop');
+    const actions = h('div', { class: 'row-actions' }, stopBtn);
+    clear(out).append(h('div', null, h('div', { class: 'progress' }, prog), sumEl, actions, list));
+    const paint = () => {
+      const ok = results.filter(r => r.working).length;
+      prog.style.width = Math.round(100 * results.length / names.length) + '%';
+      sumEl.textContent = `${results.length} of ${names.length} tested, ${ok} working`;
+      clear(list).append(...results.slice().sort((a, b) => b.score - a.score || a.host.localeCompare(b.host)).map(r =>
+        h('div', { class: 'item', style: 'grid-template-columns:auto 1fr auto', onclick: () => r.working && openCheck(r.host) }, bars(r.score, r.working), h('div', { class: 'host' }, r.host), h('div', { class: 'score' }, r.working ? String(r.score) : 'down'),
+          h('div', { class: 'meta' }, r.working ? [r.ms != null ? r.ms + ' ms' : null, r.tls ? r.tls.replace('TLSv', 'TLS ') : null, r.cdn, r.types.map(t => typeLabel[t] || t).join(', ')].filter(Boolean).map(x => h('span', null, x)) : h('span', null, r.error || 'not responding')))));
+    };
+    for (let i = 0; i < names.length && !stop; i += size) {
+      let tries = 0;
+      while (!stop) {
+        try { const d = await api('/tools/bulk', { method: 'POST', body: { hosts: names.slice(i, i + size) } }); results.push(...d.results); paint(); break; }
+        catch (e) { if (/Too many/.test(e.message) && ++tries <= 3) { sumEl.textContent = 'Slowing down to stay within the limit'; await sleep(8000); continue; } clear(actions).append(h('div', { class: 'err' }, e.message)); stop = true; }
+      }
+    }
+    const working = results.filter(r => r.working).map(r => r.host);
+    clear(actions).append(h('div', { class: 'row-actions', style: 'margin:0' }, h('button', { class: 'btn primary', disabled: !working.length, onclick: () => copy(working.join('\n')) }, `Copy ${working.length} working`),
+      state.token && working.length ? h('button', { class: 'btn', onclick: async () => { try { const r = await api('/admin/hosts', { method: 'POST', body: { hosts: working.join('\n'), country: 'GLOBAL' } }); toast(`Added ${r.added} to scanner`); } catch (e) { toast(e.message); } } }, 'Add working to scanner') : null));
+  };
+  body.append(h('div', { class: 'panel' }, h('label', { class: 'f' }, 'Hosts (one per line, up to 300)'), ta,
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: go }, 'Test all')),
+    h('p', { class: 'small muted' }, 'Tests run in small batches so you see results as they arrive. Tap a working host to see its full details.')), out);
+  if (state.prefillBulk) { ta.value = state.prefillBulk; state.prefillBulk = ''; setTimeout(go, 0); }
+}
+function openCheck(host) { state.prefillCheck = host; state.toolsTab = 'check'; viewTools(); }
+
+function looksBinary(text) {
+  const s = String(text || '').slice(0, 4000);
+  let bad = 0;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); if (c === 0xfffd || c < 9 || (c > 13 && c < 32)) bad++; }
+  return s.length > 0 && bad / s.length > 0.05;
+}
+
+function toolSniff(body) {
+  const out = h('div');
+  const ta = h('textarea', { placeholder: 'Paste a config here. Works with vless, vmess and trojan links, Xray, V2Ray and sing-box JSON, Clash YAML, .ovpn, WireGuard, stunnel and HTTP payloads.', 'aria-label': 'Config text', style: 'min-height:160px' });
+  const lockedMsg = 'This file looks encrypted or binary. Apps such as HTTP Injector, HTTP Custom and NapsternetV lock exported configs on purpose, and Moon Radar does not try to open them. Ask for an unlocked export, or copy the payload and SNI from the app screen and paste that.';
+  const go = async () => {
+    if (!ta.value.trim()) { clear(out).append(h('div', { class: 'err' }, 'Paste a config or choose a file first')); return; }
+    clear(out).append(h('p', { class: 'muted' }, 'Reading the config'));
+    try {
+      const d = await api('/tools/sniff', { method: 'POST', body: { text: ta.value } });
+      if (d.binary) { clear(out).append(h('div', { class: 'notice' }, d.notes[0])); return; }
+      const bug = d.hosts.filter(x => x.bug), other = d.hosts.filter(x => !x.bug);
+      const servers = other.filter(x => x.roles.some(r => ['Server', 'Endpoint', 'Proxy'].includes(r)));
+      const rest = other.filter(x => !servers.includes(x));
+      const row = x => h('div', { class: 'item', style: 'grid-template-columns:1fr auto' }, h('div', { class: 'host' }, x.host), h('div', null, x.roles.map(r => h('span', { class: 'chip' + (['SNI', 'Host header'].includes(r) ? ' ok' : '') }, r))));
+      const group = (title, list, hint) => list.length ? h('div', { class: 'panel' }, h('b', null, `${title} (${list.length})`), hint ? h('div', { class: 'small muted' }, hint) : null, h('div', { class: 'ledger', style: 'margin-top:8px' }, list.map(row))) : null;
+      const allNames = d.hosts.map(x => x.host);
+      clear(out).append(h('div', null,
+        h('div', { class: 'panel' }, h('b', null, bug.length ? `Found ${bug.length} bug host${bug.length === 1 ? '' : 's'}` : 'No SNI or Host names found'),
+          h('div', { class: 'small muted' }, (d.formats.length ? 'Looks like: ' + d.formats.join(', ') + '. ' : '') + `${d.hosts.length} names in total.`),
+          d.notes.map(n => h('div', { class: 'notice' }, n)),
+          h('div', { class: 'row-actions' },
+            bug.length ? h('button', { class: 'btn primary', onclick: () => { state.prefillBulk = bug.map(x => x.host).join('\n'); state.toolsTab = 'bulk'; viewTools(); } }, 'Test bug hosts') : null,
+            allNames.length ? h('button', { class: 'btn', onclick: () => { state.prefillBulk = allNames.join('\n'); state.toolsTab = 'bulk'; viewTools(); } }, 'Test all names') : null,
+            allNames.length ? h('button', { class: 'btn', onclick: () => copy(allNames.join('\n')) }, 'Copy names') : null)),
+        group('Bug host candidates', bug, 'Names in SNI and Host fields are what the carrier sees.'),
+        group('Servers and endpoints', servers),
+        d.ips.length ? h('div', { class: 'panel' }, h('b', null, `IP addresses (${d.ips.length})`), d.ips.map(i => h('div', { class: 'mono small' }, i.ip + '  ' + i.roles.join(', ')))) : null,
+        group('Other names', rest),
+        servers.length && bug.length ? h('div', { class: 'row-actions' }, h('button', { class: 'btn', onclick: () => { state.prefillSni = { target: servers[0].host, snis: bug.map(x => x.host).join('\n') }; state.toolsTab = 'snicheck'; viewTools(); } }, 'Check these names against ' + servers[0].host)) : null));
+    } catch (e) { clear(out).append(h('div', { class: 'err' }, e.message)); }
+  };
+  const file = h('input', { type: 'file', 'aria-label': 'Config file', onchange: async e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.size > 500000) { clear(out).append(h('div', { class: 'err' }, 'That file is bigger than 500 KB')); return; }
+    const txt = await f.text();
+    if (looksBinary(txt)) { ta.value = ''; clear(out).append(h('div', { class: 'notice' }, lockedMsg)); return; }
+    ta.value = txt; go();
+  } });
+  body.append(h('div', { class: 'panel' }, h('label', { class: 'f' }, 'Config text'), ta,
+    h('label', { class: 'f' }, 'Or choose a file'), file,
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: go }, 'Sniff hosts')),
+    h('p', { class: 'small muted' }, 'Reads the file on the server and lists every SNI, Host header, payload host and server in it. Nothing is saved. Locked app exports (.ehi, .hc, .npv and similar) are encrypted and are not opened.')), out);
+}
+
+function toolSniCheck(body) {
+  const out = h('div');
+  const pre = state.prefillSni || {};
+  state.prefillSni = null;
+  const target = h('input', { type: 'text', placeholder: 'IP address or server name', autocapitalize: 'none', 'aria-label': 'Server', value: pre.target || '' });
+  const port = h('input', { type: 'text', value: '443', inputmode: 'numeric', 'aria-label': 'Port' });
+  const snis = h('textarea', { placeholder: 'Leave empty to test the names found in the certificate', 'aria-label': 'Names to test', value: pre.snis || '' });
+  const go = async () => {
+    clear(out).append(h('p', { class: 'muted' }, 'Connecting and trying each name'));
+    try {
+      const d = await api('/tools/sni', { method: 'POST', body: { target: target.value, port: port.value, snis: snis.value } });
+      const dc = d.defaultCert;
+      clear(out).append(h('div', null,
+        h('div', { class: 'panel' }, h('b', { class: 'mono' }, `${d.target}:${d.port}`), h('div', { class: 'small muted' }, 'IP ' + d.ip),
+          dc ? h('dl', { class: 'facts' }, [['Default certificate', dc.subject || 'unknown'], ['Issuer', dc.issuer || 'unknown'], ['Expires', dc.validTo || 'unknown'], ['TLS', `${dc.version || ''}${dc.alpn ? ', ' + dc.alpn : ''}, ${dc.ms} ms`], ['Names on it', (dc.names || []).join(', ') || 'none']].map(([k, v]) => [h('dt', null, k), h('dd', null, v)])) : h('div', { class: 'err' }, 'No TLS answer without a name' + (d.defaultError ? ' (' + d.defaultError + ')' : ''))),
+        h('div', { class: 'panel' }, h('b', null, d.usedCertNames ? 'Names from the certificate' : 'Names you tested'), h('div', { class: 'small muted' }, 'Same certificate means the server treats the name like its default site. A different certificate means it hosts that name separately.'),
+          d.results.length ? h('table', { class: 't' }, d.results.map(r => h('tr', null, h('td', { class: 'mono small' }, r.sni), h('td', null, r.ok ? h('span', { class: 'chip ok' }, 'handshake ok') : h('span', { class: 'chip no' }, r.error || 'failed')),
+            h('td', { class: 'small muted' }, r.ok ? [r.version, r.ms + ' ms', r.nameMatch ? 'name matches' : 'name differs', r.sameCert ? 'same certificate' : 'different certificate'].filter(Boolean).join(', ') : '')))) : h('p', { class: 'muted' }, 'Nothing to test. Add names above.'))));
+    } catch (e) { clear(out).append(h('div', { class: 'err' }, e.message)); }
+  };
+  target.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  body.append(h('div', { class: 'panel' }, h('label', { class: 'f' }, 'Server'), target, h('label', { class: 'f' }, 'Port'), port, h('label', { class: 'f' }, 'Names (SNI) to test, optional'), snis,
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: go }, 'Check server')),
+    h('p', { class: 'small muted' }, 'Reads the certificate a server shows with no name, then tries names against it and compares the answers. To pull names out of a config file, use the SNI sniffer tab.')), out);
+  if (pre.target) go();
+}
+
+function toolConvert(body) {
+  const out = h('div');
+  const link = h('textarea', { placeholder: 'vless://... or vmess://... or trojan://...', 'aria-label': 'Share link' });
+  const f = {};
+  const field = (label, key, ph) => h('div', null, h('label', { class: 'f' }, label), h('input', { type: 'text', placeholder: ph, autocapitalize: 'none', oninput: e => { f[key] = e.target.value; } }));
+  const go = async () => {
+    try {
+      const d = await api('/tools/convert', { method: 'POST', body: Object.assign({ link: link.value }, f) });
+      const sm = d.summary;
+      clear(out).append(h('div', null,
+        h('div', { class: 'panel' }, h('b', null, 'Link details'), h('dl', { class: 'facts' }, Object.entries(sm).filter(([, v]) => v).map(([k, v]) => [h('dt', null, k), h('dd', { class: 'mono small' }, String(v))])),
+          d.warnings.map(w => h('div', { class: 'notice' }, w))),
+        h('div', { class: 'panel' }, copyBlock('New link', d.link), copyBlock('Xray JSON', d.xray), copyBlock('sing-box JSON', d.singbox), copyBlock('Clash / Mihomo YAML', d.clash))));
+    } catch (e) { clear(out).append(h('div', { class: 'err' }, e.message)); }
+  };
+  body.append(h('div', { class: 'panel' }, h('label', { class: 'f' }, 'Share link'), link,
+    field('Bug host (sets SNI and Host together)', 'bug', 'bug.example.com'),
+    h('div', { class: 'two' }, field('Server', 'server', 'keep as is'), field('Port', 'port', 'keep as is')),
+    h('div', { class: 'two' }, field('Path', 'path', 'keep as is'), field('Name', 'name', 'keep as is')),
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: go }, 'Convert')),
+    h('p', { class: 'small muted' }, 'Turns a link into Xray, sing-box and Clash configs, and swaps the bug host if you set one. Nothing is saved.')), out);
 }
 
 // ---------- admin ----------

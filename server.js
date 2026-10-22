@@ -10,6 +10,9 @@ const probe = require('./lib/probe');
 const disc = require('./lib/discover');
 const jobs = require('./lib/jobs');
 const gen = require('./lib/payloads');
+const tools = require('./lib/tools');
+const convert = require('./lib/convert');
+const sniffer = require('./lib/sniff');
 const { COUNTRIES, CARRIERS, inferCountry } = require('./lib/seeds');
 
 const PORT = parseInt(process.env.PORT, 10) || 8080;
@@ -225,6 +228,48 @@ async function route(req, res, url, body) {
     const r = await probe.probeHost(host, { timeoutMs: 6000, deep: true });
     const score = r.working ? probe.scoreOf(r.info, []) : 0;
     return send(res, 200, { host, working: r.working, error: r.error, score, band: probe.bandOf(score), info: r.info, protocols: r.working ? probe.protocolsOf(r.info) : [], types: probe.typesOf(r.info), testedAt: r.testedAt });
+  }
+
+  if (p === '/api/tools/convert' && m === 'POST') {
+    try { return send(res, 200, convert.convert(body.link, body)); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
+  if (p === '/api/tools/sniff' && m === 'POST') {
+    if (!isAdmin(req) && limited(req, 'sniff', 30, 60000)) return send(res, 429, { error: 'Too many requests. Wait a minute.' });
+    try { return send(res, 200, sniffer.sniff(body.text)); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
+  if (p === '/api/tools/dns' && m === 'POST') {
+    if (!isAdmin(req) && limited(req, 'dns', 30, 60000)) return send(res, 429, { error: 'Too many lookups. Wait a minute.' });
+    try { return send(res, 200, await tools.dnsLookup(String(body.name || '').trim(), { types: Array.isArray(body.types) && body.types.length ? body.types : undefined, resolver: body.resolver })); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
+  if (p === '/api/tools/ports' && m === 'POST') {
+    if (!isAdmin(req) && limited(req, 'ports', 6, 60000)) return send(res, 429, { error: 'Too many port checks. Wait a minute.' });
+    try { return send(res, 200, await tools.portCheck(String(body.host || '').trim(), body.ports)); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
+  if (p === '/api/tools/sni' && m === 'POST') {
+    if (!isAdmin(req) && limited(req, 'sni', 10, 60000)) return send(res, 429, { error: 'Too many SNI checks. Wait a minute.' });
+    const snis = String(body.snis || '').split(/[\s,;]+/).filter(Boolean);
+    try { return send(res, 200, await tools.sniProbe(String(body.target || '').trim(), snis, body.port)); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+
+  if (p === '/api/tools/bulk' && m === 'POST') {
+    const admin = isAdmin(req);
+    if (!admin && limited(req, 'bulk', 12, 60000)) return send(res, 429, { error: 'Too many requests. Wait a few seconds.' });
+    const raw = Array.isArray(body.hosts) ? body.hosts : String(body.hosts || '').split(/[\s,;]+/);
+    const names = [...new Set(raw.map(probe.cleanHost).filter(Boolean))].slice(0, admin ? 30 : 10);
+    if (!names.length) return send(res, 400, { error: 'No valid host names found' });
+    const results = [];
+    await disc.pool(names, 6, async host => {
+      const r = await probe.probeHost(host, { timeoutMs: 5000 });
+      const score = r.working ? probe.scoreOf(r.info, []) : 0;
+      const t = r.info.tls || {};
+      results.push({ host, working: r.working, error: r.error, score, band: probe.bandOf(score), ms: t.ok ? t.ms : null, tls: t.version || null, cdn: r.info.cdn || null, types: probe.typesOf(r.info), ip: r.info.ip || null });
+    });
+    results.sort((a, b) => b.score - a.score || a.host.localeCompare(b.host));
+    return send(res, 200, { results });
   }
 
   if (p === '/api/tools/subdomains' && m === 'POST') {

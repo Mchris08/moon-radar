@@ -14,6 +14,8 @@ class El {
   querySelector(sel) { return findAll(this, sel)[0] || null; }
   querySelectorAll(sel) { return findAll(this, sel); }
   remove() {} close() {} showModal() {} select() {}
+  get textContent() { return this.text(); }
+  set textContent(v) { this.children = [{ nodeType: 3, data: String(v) }]; }
   get classList() { return { contains: c => this.className.split(' ').includes(c) }; }
   text() { return this.children.map(c => c.nodeType === 3 ? c.data : c.text()).join(' '); }
 }
@@ -74,6 +76,32 @@ Object.defineProperty(global, 'navigator', { value: { clipboard: { writeText: as
   check('detail sheet has no stray "null"/"undefined" text', !/\bnull\b|undefined|\[object/.test(sheet), sheet);
   check('detail sheet lists facts and protocols', sheet.includes('DigiCert') && sheet.includes('SSL/TLS + SNI') && sheet.includes('WebSocket + TLS'), sheet.slice(0, 400));
 
+  const WANT = { bulk: 'Hosts (one per line', dns: 'Record types', ports: 'Check ports', sni: 'Sniff hosts', snicheck: 'Check server', convert: 'Share link', subdomains: 'Find subdomains', check: 'Test host' };
+  for (const tab of ['sni', 'snicheck', 'bulk', 'dns', 'ports', 'convert']) { app.state.toolsTab = tab; app.viewTools(); await wait(50); const d = dump(); check('new tool renders: ' + tab, d.includes(WANT[tab]) && !/\bnull\b|undefined|\[object/.test(d), d.slice(0, 300)); }
+  const all = (n, acc = []) => { acc.push(n); (n.children || []).forEach(c => c.nodeType === 1 && all(c, acc)); return acc; };
+  const find = (tag, pred = () => true) => all(byId.app).find(e => e.tag === tag && pred(e));
+  const press = label => { const b = find('button', e => e.text().trim() === label) || find('button', e => e.text().includes(label)); b.listeners.click.forEach(f => f({ target: b })); };
+  const LINK = 'vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?encryption=none&security=tls&sni=a.com&type=ws&host=a.com&path=%2Fws#My%20Node';
+  app.state.toolsTab = 'convert'; app.viewTools(); find('textarea').value = LINK;
+  find('input', e => e.attrs.placeholder === 'bug.example.com').listeners.input[0]({ target: { value: 'bug.econet.co.zw' } });
+  press('Convert'); await wait(300);
+  let dd = dump();
+  check('converter shows link, Xray, sing-box and Clash', ['New link', 'Xray JSON', 'sing-box JSON', 'Clash / Mihomo YAML', 'bug.econet.co.zw'].every(x => dd.includes(x)) && !/\[object|undefined/.test(dd), dd.slice(0, 300));
+  app.state.toolsTab = 'dns'; app.viewTools(); find('input').value = '127.0.0.1'; press('Look up'); await wait(400);
+  dd = dump(); check('DNS lookup renders an answer for an IP', dd.includes('PTR') && !/\[object|undefined/.test(dd), dd.slice(0, 300));
+  app.state.toolsTab = 'ports'; app.viewTools(); find('input').value = '127.0.0.1'; press('Check ports'); await wait(300);
+  check('port checker shows the private-address error', dump().includes('private'), dump().slice(0, 300));
+  app.state.toolsTab = 'snicheck'; app.viewTools(); find('input').value = '127.0.0.1'; press('Check server'); await wait(300);
+  check('SNI check shows the private-address error', dump().includes('private'), dump().slice(0, 300));
+  app.state.toolsTab = 'bulk'; app.viewTools(); find('textarea').value = 'gone.nonexistent-radar-test.co.ke\nb.nonexistent-radar-test.co.ke'; press('Test all'); await wait(2500);
+  dd = dump(); check('bulk tester lists results and a summary', dd.includes('2 of 2 tested') && dd.includes('gone.nonexistent-radar-test.co.ke') && !/\[object|undefined/.test(dd), dd.slice(0, 300));
+  app.state.toolsTab = 'sni'; app.viewTools(); find('textarea').value = 'vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?security=tls&sni=bug.econet.co.zw&type=ws&host=cdn.bug.co.zw#a'; press('Sniff hosts'); await wait(300);
+  dd = dump(); check('SNI sniffer lists bug hosts, servers and actions', ['Found 2 bug hosts', 'bug.econet.co.zw', 'cdn.bug.co.zw', 'vpn.example.com', 'Test bug hosts', 'Servers and endpoints'].every(x => dd.includes(x)) && !/\[object|undefined/.test(dd), dd.slice(0, 400));
+  press('Test bug hosts'); await wait(2500);
+  check('"Test bug hosts" opens the bulk tester and runs it', dump().includes('2 of 2 tested'), dump().slice(0, 300));
+  app.state.toolsTab = 'sni'; app.viewTools(); find('textarea').value = String.fromCharCode(0, 1, 2, 3, 4, 5, 6, 7).repeat(100); press('Sniff hosts'); await wait(300);
+  check('SNI sniffer explains locked files', /encrypted|locked/i.test(dump()), dump().slice(0, 300));
+  check('tool tab bar lists all nine tools', ['Subdomains', 'Check host', 'Bulk test', 'DNS', 'Ports', 'SNI sniffer', 'SNI check', 'Converter', 'Payloads'].every(x => dump().includes(x)), dump().slice(0, 200));
   for (const tab of ['subdomains', 'check', 'payload']) { app.state.toolsTab = tab; app.viewTools(); await wait(50); check('tools tab renders: ' + tab, dump().length > 20 && !/\bnull\b|undefined|\[object/.test(dump()), dump()); }
   app.state.prefillHost = 'bug.econet.co.zw'; app.state.toolsTab = 'payload'; app.viewTools(); await wait(300);
   check('payload generator output appears', dump().includes('Upgrade: websocket') && dump().includes('vless://'), dump().slice(0, 300));

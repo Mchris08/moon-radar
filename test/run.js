@@ -26,7 +26,7 @@ async function t(name, fn) {
   const disc = require('../lib/discover');
 
   console.log('probe engine');
-  execSync(`openssl req -x509 -newkey rsa:2048 -nodes -keyout ${tmp}/k.pem -out ${tmp}/c.pem -days 30 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" 2>/dev/null`);
+  execSync(`openssl req -x509 -newkey rsa:2048 -nodes -keyout ${tmp}/k.pem -out ${tmp}/c.pem -days 30 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,DNS:test.example.com" 2>/dev/null`);
   const tlsSrv = http2.createSecureServer({ key: fs.readFileSync(tmp + '/k.pem'), cert: fs.readFileSync(tmp + '/c.pem'), allowHTTP1: true }, (req, res) => { res.setHeader('server', 'cloudflare'); res.end('hi'); });
   tlsSrv.on('upgrade', (req, sock) => { sock.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'); sock.end(); });
   await new Promise(r => tlsSrv.listen(0, '127.0.0.1', r));
@@ -91,6 +91,88 @@ async function t(name, fn) {
   await t('payload generator rejects header injection in fields', () => {
     const g = gen.generate({ host: 'a.example.com\r\nX: y', path: '/a b\r\nEvil: 1' });
     assert.ok(!g.payloads.some(p => /Evil/.test(p.text) && /\r\n/.test(p.text)));
+  });
+
+  console.log('new tools');
+  const tools = require('../lib/tools');
+  const convert = require('../lib/convert');
+  const LINK = 'vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?encryption=none&security=tls&sni=a.com&fp=chrome&type=ws&host=a.com&path=%2Fws#My%20Node';
+  await t('converter: link round-trips unchanged', () => { assert.strictEqual(convert.convert(LINK, {}).link, LINK); });
+  await t('converter: bug host swaps SNI and Host and builds every format', () => {
+    const r = convert.convert(LINK, { bug: 'bug.econet.co.zw' });
+    assert.ok(r.link.includes('sni=bug.econet.co.zw') && r.link.includes('host=bug.econet.co.zw'));
+    const x = JSON.parse(r.xray).outbounds[0];
+    assert.strictEqual(x.streamSettings.tlsSettings.serverName, 'bug.econet.co.zw');
+    assert.strictEqual(x.streamSettings.wsSettings.headers.Host, 'bug.econet.co.zw');
+    const sb = JSON.parse(r.singbox).outbounds[0];
+    assert.strictEqual(sb.tls.server_name, 'bug.econet.co.zw'); assert.strictEqual(sb.transport.type, 'ws');
+    assert.ok(r.clash.includes('servername: "bug.econet.co.zw"') && r.clash.includes('type: vless'));
+  });
+  await t('converter: vmess and trojan parse and convert', () => {
+    const vm = 'vmess://' + Buffer.from(JSON.stringify({ v: '2', ps: 'vm', add: '1.2.3.4', port: '443', id: '11111111-2222-3333-4444-555555555555', aid: '0', net: 'ws', host: 'h.com', path: '/', tls: 'tls', sni: 'h.com' })).toString('base64');
+    const a = convert.convert(vm, { bug: 'new.example.com' });
+    assert.strictEqual(JSON.parse(Buffer.from(a.link.slice(8), 'base64').toString()).sni, 'new.example.com');
+    const b = convert.convert('trojan://pw@s.example.com:443?security=tls&sni=x.com&type=grpc&serviceName=svc#T', {});
+    assert.strictEqual(JSON.parse(b.xray).outbounds[0].streamSettings.grpcSettings.serviceName, 'svc');
+    assert.ok(b.clash.includes('password: "pw"'));
+  });
+  await t('converter: rejects bad input and warns about missing TLS', () => {
+    assert.throws(() => convert.convert('http://x', {}), /vless/);
+    assert.throws(() => convert.convert('vmess://@@@', {}), /base64/);
+    assert.ok(convert.convert('vless://11111111-2222-3333-4444-555555555555@s.com:80?type=ws&security=none', {}).warnings.length >= 1);
+  });
+  await t('port parsing and limits', () => {
+    assert.deepStrictEqual(tools.parsePorts('22,80,8000-8002'), [22, 80, 8000, 8001, 8002]);
+    assert.throws(() => tools.parsePorts('0')); assert.throws(() => tools.parsePorts('1-100')); assert.throws(() => tools.parsePorts('abc'));
+  });
+  await t('port checker reports open, closed and blocks private hosts', async () => {
+    const dead = await new Promise(r => { const s = require('net').createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+    const r = await tools.portCheck('127.0.0.1', `${ports.tls},${ports.http},${dead}`, { allowPrivate: true });
+    const by = Object.fromEntries(r.results.map(x => [x.port, x.status]));
+    assert.strictEqual(by[ports.tls], 'open'); assert.strictEqual(by[ports.http], 'open'); assert.strictEqual(by[dead], 'closed');
+    await assert.rejects(() => tools.portCheck('127.0.0.1', '80'), /private/);
+  });
+  await t('SNI probe reads the default certificate and tests names', async () => {
+    const r = await tools.sniProbe('127.0.0.1', ['test.example.com', 'other.example.com'], ports.tls, { allowPrivate: true });
+    assert.ok(r.defaultCert && r.defaultCert.names.includes('test.example.com'));
+    const loc = r.results.find(x => x.sni === 'test.example.com'); assert.ok(loc.ok && loc.nameMatch && loc.sameCert);
+    const oth = r.results.find(x => x.sni === 'other.example.com'); assert.ok(oth.ok && !oth.nameMatch);
+    const auto = await tools.sniProbe('127.0.0.1', [], ports.tls, { allowPrivate: true });
+    assert.ok(auto.usedCertNames && auto.results.length >= 1);
+    await assert.rejects(() => tools.sniProbe('127.0.0.1', [], 443), /private/);
+  });
+  await t('DNS lookup: system resolver, IPs, validation', async () => {
+    const r = await tools.dnsLookup('127.0.0.1', {}); assert.ok('PTR' in r.records || 'PTR' in r.errors);
+    await assert.rejects(() => tools.dnsLookup('not a domain!', {}), /valid domain/);
+    const q = await tools.dnsLookup('example.com', { types: ['A'], resolver: 'cloudflare' });
+    assert.ok(Array.isArray(q.records.A) || q.errors.A, 'expected either records or a clear error');
+  });
+
+  await t('sniffer: pulls SNI, Host and servers from links, JSON, YAML, ovpn, payloads and subscriptions', () => {
+    const sniffer = require('../lib/sniff');
+    const names = r => Object.fromEntries(r.hosts.map(h => [h.host, h.roles]));
+    let r = sniffer.sniff('vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?security=tls&sni=bug.econet.co.zw&type=ws&host=cdn.bug.co.zw#a');
+    assert.deepStrictEqual(r.bugHosts.sort(), ['bug.econet.co.zw', 'cdn.bug.co.zw']); assert.deepStrictEqual(names(r)['vpn.example.com'], ['Server']);
+    r = sniffer.sniff(JSON.stringify({ outbounds: [{ settings: { vnext: [{ address: 'srv.example.com' }] }, streamSettings: { tlsSettings: { serverName: 'm.econet.co.zw' }, wsSettings: { headers: { Host: 'cdn.econet.co.zw' } } } }] }));
+    assert.deepStrictEqual(r.bugHosts.sort(), ['cdn.econet.co.zw', 'm.econet.co.zw']); assert.ok(r.formats.includes('JSON config'));
+    r = sniffer.sniff('client\nremote vpn.example.com 443\nhttp-proxy-option CUSTOM-HEADER Host bug.telecel.co.zw\n# see config.json');
+    assert.deepStrictEqual(r.bugHosts, ['bug.telecel.co.zw']); assert.ok(!names(r)['config.json']);
+    r = sniffer.sniff('GET / HTTP/1.1[crlf]Host: bug.econet.co.zw[crlf]Upgrade: websocket[crlf][crlf]');
+    assert.deepStrictEqual(r.bugHosts, ['bug.econet.co.zw']); assert.ok(!r.hosts.some(h => /host/.test(h.host)), 'placeholders must not become hosts');
+    r = sniffer.sniff('CONNECT [host_port]@front.netone.co.zw [protocol][crlf]X-Online-Host: bug2.netone.co.zw[crlf][crlf]GET http://decoy.zol.co.zw/ HTTP/1.1[crlf]Referer: http://ref.zol.co.zw/');
+    assert.deepStrictEqual(r.bugHosts.sort(), ['bug2.netone.co.zw', 'decoy.zol.co.zw', 'front.netone.co.zw', 'ref.zol.co.zw']);
+    r = sniffer.sniff('proxies:\n  - server: "v.example.com"\n    servername: "sni.econet.co.zw"\n    ws-opts:\n      headers:\n        Host: "h.econet.co.zw"');
+    assert.deepStrictEqual(r.bugHosts.sort(), ['h.econet.co.zw', 'sni.econet.co.zw']);
+    r = sniffer.sniff('[Interface]\nAddress = 10.8.0.2/24\n[Peer]\nEndpoint = wg.example.com:51820');
+    assert.deepStrictEqual(r.bugHosts, []); assert.ok(r.notes.some(n => /only has server/.test(n))); assert.ok(!r.ips.some(i => i.ip === '10.8.0.2'));
+    const sub = Buffer.from('vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?security=tls&sni=bug.sub.co.zw&type=ws#a').toString('base64');
+    r = sniffer.sniff(sub); assert.deepStrictEqual(r.bugHosts, ['bug.sub.co.zw']); assert.ok(r.notes[0].includes('base64'));
+  });
+  await t('sniffer: refuses locked binary files and bad input', () => {
+    const sniffer = require('../lib/sniff');
+    const r = sniffer.sniff(String.fromCharCode(0, 1, 2, 3, 4, 5, 6, 7).repeat(200));
+    assert.strictEqual(r.binary, true); assert.ok(/encrypted|locked/i.test(r.notes[0]));
+    assert.throws(() => sniffer.sniff('   '), /Paste/); assert.throws(() => sniffer.sniff('a'.repeat(600000)), /too big/);
   });
 
   console.log('server, auth and review workflow');
@@ -181,6 +263,28 @@ async function t(name, fn) {
     const r = await call('/admin/sources', { method: 'POST', token, body: { domains: 'zero.example.co.zw\nbad host', country: 'ZW' } });
     assert.strictEqual(r.data.added, 1);
     assert.strictEqual((await call('/admin/sources', { method: 'POST', token, body: { domains: 'zero.example.co.zw' } })).data.added, 0);
+  });
+  await t('tool endpoints validate input and are rate limited', async () => {
+    assert.strictEqual((await call('/tools/convert', { method: 'POST', body: { link: 'nope' } })).status, 400);
+    const ok = await call('/tools/convert', { method: 'POST', body: { link: LINK, bug: 'b.example.com' } });
+    assert.strictEqual(ok.status, 200); assert.ok(ok.data.link.includes('b.example.com') && ok.data.xray && ok.data.singbox && ok.data.clash);
+    assert.strictEqual((await call('/tools/sniff', { method: 'POST', body: { text: '' } })).status, 400);
+    const sn = await call('/tools/sniff', { method: 'POST', body: { text: LINK } });
+    assert.strictEqual(sn.status, 200); assert.ok(sn.data.bugHosts.includes('a.com'));
+    assert.strictEqual((await call('/tools/dns', { method: 'POST', body: { name: '###' } })).status, 400);
+    assert.strictEqual((await call('/tools/ports', { method: 'POST', body: { host: '127.0.0.1', ports: '80' } })).status, 400);
+    assert.strictEqual((await call('/tools/sni', { method: 'POST', body: { target: '127.0.0.1' } })).status, 400);
+    assert.strictEqual((await call('/tools/bulk', { method: 'POST', body: { hosts: '### !!!' } })).status, 400);
+    const b = await call('/tools/bulk', { method: 'POST', body: { hosts: 'gone.nonexistent-radar-test.co.ke 127.0.0.1 a.invalid' } });
+    assert.strictEqual(b.status, 200); assert.ok(b.data.results.length >= 1 && b.data.results.every(r => r.working === false));
+    let last; for (let i = 0; i < 8; i++) last = await call('/tools/ports', { method: 'POST', body: { host: 'example.com', ports: '80' } });
+    assert.strictEqual(last.status, 429);
+  });
+  await t('bulk tester caps public requests at 10 hosts', async () => {
+    const many = Array.from({ length: 25 }, (_, i) => `h${i}.nonexistent-radar-test.co.ke`).join(' ');
+    await new Promise(r => setTimeout(r, 100));
+    const r = await call('/tools/bulk', { method: 'POST', body: { hosts: many } });
+    assert.ok(r.status === 200 ? r.data.results.length <= 10 : r.status === 429);
   });
   await t('public tools: generate and input validation', async () => {
     const g = await call('/tools/generate', { method: 'POST', body: { host: 'a.example.com', server: 'v.example.com' } });
