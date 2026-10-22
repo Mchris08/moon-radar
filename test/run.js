@@ -213,6 +213,34 @@ async function t(name, fn) {
     assert.strictEqual((await call('/admin/password', { method: 'POST', token, body: { current: 'bad', next: 'longenough1' } })).status, 401);
     assert.strictEqual((await call('/admin/password', { method: 'POST', token, body: { current: 'test-password-1', next: 'short' } })).status, 400);
   });
+  await t('backup excludes secrets and restore brings hosts and approvals back', async () => {
+    assert.strictEqual((await call('/admin/backup')).status, 401);
+    const b = await call('/admin/backup', { token });
+    assert.strictEqual(b.status, 200);
+    const raw = JSON.stringify(b.data);
+    assert.ok(!raw.includes('adminHash') && !raw.includes('adminPath') && !raw.includes('secret-test-path'));
+    assert.strictEqual(b.data.format, 'moon-radar-backup');
+    const hostsBefore = Object.keys(db.hosts).length;
+    const approvedBefore = db.hosts['x.netone.co.zw'].review;
+    const hashBefore = db.settings.adminHash;
+    for (const k of Object.keys(db.hosts)) delete db.hosts[k];                 // simulate a wipe
+    assert.strictEqual((await call('/hosts')).data.total, 0);
+    const r = await call('/admin/restore', { method: 'POST', token, body: b.data });
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.data.hosts, hostsBefore);
+    assert.strictEqual(db.hosts['x.netone.co.zw'].review, approvedBefore);
+    assert.strictEqual(db.settings.adminHash, hashBefore, 'restore must not touch the admin password');
+    assert.ok((await call('/hosts')).data.total >= 1);
+  });
+  await t('restore rejects garbage and needs login', async () => {
+    assert.strictEqual((await call('/admin/restore', { method: 'POST', body: {} })).status, 401);
+    assert.strictEqual((await call('/admin/restore', { method: 'POST', token, body: { hello: 1 } })).status, 400);
+    const evil = { format: 'moon-radar-backup', hosts: { 'good.example.co.zw': { country: 'ZW', review: 'approved', working: true, score: 9999, history: 'x' }, '<script>': { country: 'ZW' } }, settings: { adminHash: 'hacked', retestHour: 99 } };
+    const hashBefore = db.settings.adminHash;
+    const r = await call('/admin/restore', { method: 'POST', token, body: evil });
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.data.hosts, 1);
+    assert.strictEqual(db.hosts['good.example.co.zw'].score, 100);
+    assert.strictEqual(db.settings.adminHash, hashBefore); assert.strictEqual(db.settings.retestHour, 23);
+  });
   await t('static files are served and traversal is blocked', async () => {
     const r = await fetch(base + '/'); assert.strictEqual(r.status, 200); assert.ok((await r.text()).includes('Radar'));
     const bad = await fetch(base + '/..%2f..%2fserver.js'); assert.strictEqual(bad.status, 403);
@@ -221,7 +249,7 @@ async function t(name, fn) {
   await t('database persists to disk', () => {
     store.flush();
     const disk = JSON.parse(fs.readFileSync(path.join(process.env.DATA_DIR, 'db.json'), 'utf8'));
-    assert.ok(disk.hosts['cdn.example.co.ke']); assert.ok(disk.settings.adminHash && !disk.settings.adminHash.includes('test-password'));
+    assert.ok(disk.hosts['good.example.co.zw']); assert.ok(disk.settings.adminHash && !disk.settings.adminHash.includes('test-password'));
   });
 
   server.close(); tlsSrv.close(); httpSrv.close();

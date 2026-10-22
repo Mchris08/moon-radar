@@ -397,6 +397,30 @@ async function adminSettings(body) {
     num('Parallel tests', 'concurrency', 'Lower this on weak phones.'), num('Timeout per test (ms)', 'timeoutMs'),
     num('Forget auto-found hosts down for (days)', 'pruneDays'), num('Max new hosts per run', 'maxNewPerRun'), num('Deep scan weekday (0 = Sunday)', 'deepWeekday'),
     msg, h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: async () => { try { await api('/admin/settings', { method: 'POST', body: { carrier: inputs.carrier.value, autoDaily: inputs.autoDaily.checked, zeroBalanceMode: inputs.zero.checked, retestHour: inputs.retestHour.value, concurrency: inputs.concurrency.value, timeoutMs: inputs.timeoutMs.value, pruneDays: inputs.pruneDays.value, maxNewPerRun: inputs.maxNewPerRun.value, deepWeekday: inputs.deepWeekday.value } }); clear(msg).append(h('div', { class: 'ok-msg' }, 'Saved')); } catch (e) { clear(msg).append(h('div', { class: 'err' }, e.message)); } } }, 'Save settings'))));
+  const bmsg = h('div');
+  const file = h('input', { type: 'file', accept: '.json,application/json', 'aria-label': 'Backup file' });
+  body.append(h('div', { class: 'panel' }, h('b', null, 'Backup and restore'),
+    h('p', { class: 'small muted' }, 'Free hosting can wipe your data when it restarts. Download a backup now and then. After a wipe, restore it to get all hosts and Zimbabwe approvals back. The file holds no passwords.'),
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: async () => {
+      try {
+        const r = await fetch('/api/admin/backup', { headers: { Authorization: 'Bearer ' + state.token } });
+        if (!r.ok) throw new Error('Backup failed');
+        const blob = await r.blob();
+        const a = h('a', { href: URL.createObjectURL(blob), download: 'moon-radar-backup-' + new Date().toISOString().slice(0, 10) + '.json' });
+        document.body.append(a); a.click(); a.remove();
+        clear(bmsg).append(h('div', { class: 'ok-msg' }, 'Backup downloaded'));
+      } catch (e) { clear(bmsg).append(h('div', { class: 'err' }, e.message)); }
+    } }, 'Download backup')),
+    h('label', { class: 'f' }, 'Restore from a backup file'), file,
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn danger', onclick: async () => {
+      if (!file.files || !file.files[0]) { clear(bmsg).append(h('div', { class: 'err' }, 'Choose a backup file first')); return; }
+      if (!confirm('This replaces all current hosts, approvals and sources with the backup. Continue?')) return;
+      try {
+        const data = JSON.parse(await file.files[0].text());
+        const r = await api('/admin/restore', { method: 'POST', body: data });
+        clear(bmsg).append(h('div', { class: 'ok-msg' }, `Restored ${r.hosts} hosts and ${r.sources} sources`));
+      } catch (e) { clear(bmsg).append(h('div', { class: 'err' }, e.message)); }
+    } }, 'Restore backup')), bmsg));
   const cur = h('input', { type: 'password', autocomplete: 'current-password' }), nxt = h('input', { type: 'password', autocomplete: 'new-password' }), pm = h('div');
   body.append(h('div', { class: 'panel' }, h('b', null, 'Change password'), h('label', { class: 'f' }, 'Current password'), cur, h('label', { class: 'f' }, 'New password (8+ characters)'), nxt, pm,
     h('div', { class: 'row-actions' }, h('button', { class: 'btn', onclick: async () => { try { await api('/admin/password', { method: 'POST', body: { current: cur.value, next: nxt.value } }); state.token = ''; localStorage.removeItem('radar_token'); toast('Password changed. Sign in again.'); route(); } catch (e) { clear(pm).append(h('div', { class: 'err' }, e.message)); } } }, 'Change password'))));

@@ -86,7 +86,7 @@ Object.defineProperty(global, 'navigator', { value: { clipboard: { writeText: as
     app.state.adminTab = tab; app.viewAdmin(); await wait(300);
     const d = dump();
     check('no stray null/undefined in admin ' + tab, !/\bnull\b|undefined|\[object/.test(d), d.slice(0, 300));
-    const want = { review: 'pending.econet.co.zw', hosts: 'cdn.safaricom.co.ke', sources: 'econet.co.zw', jobs: 'working', settings: 'Daily scan hour' }[tab];
+    const want = { review: 'pending.econet.co.zw', hosts: 'cdn.safaricom.co.ke', sources: 'econet.co.zw', jobs: 'working', settings: 'Download backup' }[tab];
     check('admin tab renders: ' + tab, d.includes(want), d.slice(0, 300));
   }
   server.close();

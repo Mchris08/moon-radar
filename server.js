@@ -69,9 +69,9 @@ const send = (res, code, data, headers = {}) => {
   res.writeHead(code, Object.assign({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, headers));
   res.end(body);
 };
-const readBody = req => new Promise((resolve, reject) => {
+const readBody = (req, limit = 1e6) => new Promise((resolve, reject) => {
   let b = '';
-  req.on('data', c => { b += c; if (b.length > 1e6) { req.destroy(); reject(new Error('Body too large')); } });
+  req.on('data', c => { b += c; if (b.length > limit) { req.destroy(); reject(new Error('Body too large')); } });
   req.on('end', () => { try { resolve(b ? JSON.parse(b) : {}); } catch (_) { reject(new Error('Invalid JSON')); } });
   req.on('error', reject);
 });
@@ -115,6 +115,71 @@ function publicMeta() {
   const carriers = {};
   pub.forEach(h => h.carriers.forEach(c => { carriers[c] = (carriers[c] || 0) + 1; }));
   return { total: pub.length, counts, carriers, countries: COUNTRIES, carrierMap: CARRIERS, lastDaily: db.meta.lastDaily, scannerCarrier: db.settings.carrier, busy: jobs.status().running };
+}
+
+function applySettings(s, body) {
+  const clamp = (v, lo, hi, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; };
+  s.retestHour = clamp(body.retestHour, 0, 23, s.retestHour);
+  s.concurrency = clamp(body.concurrency, 1, 100, s.concurrency);
+  s.timeoutMs = clamp(body.timeoutMs, 1500, 20000, s.timeoutMs);
+  s.pruneDays = clamp(body.pruneDays, 3, 180, s.pruneDays);
+  s.maxNewPerRun = clamp(body.maxNewPerRun, 20, 5000, s.maxNewPerRun);
+  s.deepWeekday = clamp(body.deepWeekday, 0, 6, s.deepWeekday);
+  if (typeof body.carrier === 'string') s.carrier = body.carrier.slice(0, 30);
+  if (typeof body.autoDaily === 'boolean') s.autoDaily = body.autoDaily;
+  if (typeof body.zeroBalanceMode === 'boolean') s.zeroBalanceMode = body.zeroBalanceMode;
+}
+
+// ---------- backup / restore ----------
+// Backups hold hosts, approvals, sources and settings. They never contain the admin password hash or the secret admin address.
+function makeBackup() {
+  const settings = Object.assign({}, db.settings);
+  delete settings.adminHash; delete settings.adminPath;
+  return { format: 'moon-radar-backup', version: 1, createdAt: Date.now(), hosts: db.hosts, sources: db.sources, settings, runs: db.runs, meta: db.meta };
+}
+
+function restoreBackup(data) {
+  if (!data || data.format !== 'moon-radar-backup' || !data.hosts || typeof data.hosts !== 'object') throw new Error('This is not a Moon Radar backup file');
+  const REVIEWS = ['new', 'pending', 'approved', 'rejected', 'auto'];
+  const hosts = {};
+  let n = 0;
+  for (const [k, h] of Object.entries(data.hosts)) {
+    const name = probe.cleanHost(k);
+    if (!name || !h || typeof h !== 'object') continue;
+    if (++n > 50000) break;
+    const rec = jobs.newHostRecord(name, { country: typeof h.country === 'string' ? h.country : 'GLOBAL', carriers: Array.isArray(h.carriers) ? h.carriers.map(String).slice(0, 8) : [], source: String(h.source || 'restore').slice(0, 80), parent: h.parent ? String(h.parent) : null });
+    Object.assign(rec, {
+      firstSeen: +h.firstSeen || rec.firstSeen, lastTested: +h.lastTested || 0, lastOk: +h.lastOk || 0,
+      working: !!h.working, failStreak: +h.failStreak || 0,
+      review: REVIEWS.includes(h.review) ? h.review : rec.review,
+      score: Math.max(0, Math.min(100, +h.score || 0)),
+      info: h.info && typeof h.info === 'object' ? h.info : {},
+      history: Array.isArray(h.history) ? h.history.slice(-30).map(x => ({ t: +x.t || 0, ok: !!x.ok, ms: x.ms == null ? null : +x.ms })) : [],
+      verified: h.verified && typeof h.verified === 'object' ? h.verified : {},
+      note: String(h.note || '').slice(0, 200),
+      protocols: Array.isArray(h.protocols) ? h.protocols : [],
+      types: Array.isArray(h.types) ? h.types.map(String) : [],
+      error: h.error ? String(h.error) : null
+    });
+    if (rec.country !== 'ZW' && (rec.review === 'new' || rec.review === 'pending')) rec.review = 'auto';
+    hosts[name] = rec;
+  }
+  const sources = [];
+  const seen = new Set();
+  for (const s of Array.isArray(data.sources) ? data.sources : []) {
+    const d = s && probe.cleanHost(s.domain);
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    sources.push({ domain: d, country: String(s.country || 'GLOBAL').slice(0, 10), carriers: Array.isArray(s.carriers) ? s.carriers.map(String).slice(0, 8) : [], kind: s.kind === 'seed' ? 'seed' : 'zero-rated', deep: !!s.deep, enabled: s.enabled !== false, added: +s.added || Date.now() });
+  }
+  db.hosts = hosts;
+  if (sources.length) db.sources = sources;
+  if (data.settings && typeof data.settings === 'object') applySettings(db.settings, data.settings);
+  if (Array.isArray(data.runs)) db.runs = data.runs.slice(-60);
+  if (data.meta && +data.meta.lastDaily) db.meta.lastDaily = +data.meta.lastDaily;
+  store.save();
+  jobs.log(`Backup restored: ${Object.keys(hosts).length} hosts, ${db.sources.length} sources`);
+  return { hosts: Object.keys(hosts).length, sources: db.sources.length };
 }
 
 // ---------- routes ----------
@@ -290,21 +355,19 @@ async function route(req, res, url, body) {
       jobs.runCidr({ cidr: body.cidr, country: body.country || 'GLOBAL', carriers: body.carriers || [] }).catch(e => jobs.log('CIDR failed: ' + e.message));
       return send(res, 200, { started: 'cidr' });
     }
+    if (p === '/api/admin/backup' && m === 'GET') {
+      const day = new Date().toISOString().slice(0, 10);
+      return send(res, 200, makeBackup(), { 'Content-Disposition': `attachment; filename="moon-radar-backup-${day}.json"` });
+    }
+    if (p === '/api/admin/restore' && m === 'POST') {
+      if (jobs.status().running) return send(res, 409, { error: 'A scan is running. Stop it or wait, then restore.' });
+      try { return send(res, 200, restoreBackup(body)); } catch (e) { return send(res, 400, { error: e.message }); }
+    }
     if (p === '/api/admin/stop' && m === 'POST') { jobs.stop(); return send(res, 200, { ok: true }); }
 
     if (p === '/api/admin/settings' && m === 'GET') { const s = Object.assign({}, db.settings); delete s.adminHash; delete s.adminPath; return send(res, 200, s); }
     if (p === '/api/admin/settings' && m === 'POST') {
-      const s = db.settings;
-      const clamp = (v, lo, hi, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; };
-      s.retestHour = clamp(body.retestHour, 0, 23, s.retestHour);
-      s.concurrency = clamp(body.concurrency, 1, 100, s.concurrency);
-      s.timeoutMs = clamp(body.timeoutMs, 1500, 20000, s.timeoutMs);
-      s.pruneDays = clamp(body.pruneDays, 3, 180, s.pruneDays);
-      s.maxNewPerRun = clamp(body.maxNewPerRun, 20, 5000, s.maxNewPerRun);
-      s.deepWeekday = clamp(body.deepWeekday, 0, 6, s.deepWeekday);
-      if (typeof body.carrier === 'string') s.carrier = body.carrier.slice(0, 30);
-      if (typeof body.autoDaily === 'boolean') s.autoDaily = body.autoDaily;
-      if (typeof body.zeroBalanceMode === 'boolean') s.zeroBalanceMode = body.zeroBalanceMode;
+      applySettings(db.settings, body);
       store.save();
       return send(res, 200, { ok: true });
     }
@@ -340,7 +403,9 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
     if (url.pathname.startsWith('/api/')) {
-      const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
+      const big = url.pathname === '/api/admin/restore';
+      if (big && !isAdmin(req)) return send(res, 401, { error: 'Sign in required' });
+      const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req, big ? 40e6 : 1e6);
       return await route(req, res, url, body);
     }
     return serveStatic(req, res, url);
