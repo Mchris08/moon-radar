@@ -47,3 +47,29 @@ You also need your own tunnel server (SSH, V2Ray or Xray). Radar builds the clie
     npm test
 
 Covers the probe engine against a local TLS/h2/WebSocket target, scoring, the approval workflow, auth, rate limits, the offline guard and every UI view.
+
+## Tunnel server
+
+HA Tunnel and HTTP Injector log in to an SSH server, so a bug host alone gives no internet. `server/setup-tunnel.sh` sets up SSH over TLS (port 443) on a rented Ubuntu or Debian VPS and prints the app settings. Read `server/SETUP.md`.
+
+## Cloud configs
+
+Admin > Cloud hosts your VPN config at a private link (`/c/<token>`) that stops working when its timer runs out. Paste vless, vmess or trojan links (one per line) and/or an SSH profile (server, port, user, password, SNI, payload), then set how long it lasts (5 minutes to 365 days). Options: start the timer when an app first opens it, and limit how many times apps can open it. You can extend, revoke, restore or delete a link at any time.
+
+- The link works as a subscription URL in v2rayNG, NekoBox, Hiddify and similar apps. It sends the expiry time in the standard `Subscription-Userinfo` header, which apps that support it show. `?f=raw`, `?f=clash`, `?f=singbox` and `?f=xray` give other formats.
+- Opening the link in a browser shows a readable page. That does not start the timer or use up the open limit.
+- Expired links answer "410 Gone". Old expired links are removed after 30 days.
+- HTTP Injector's own cloud config format is encrypted and proprietary, so it is not produced here.
+- Cloud configs are stored on the server and are not part of backups, because they hold your server logins. On a free host that restarts, they are lost.
+
+## Contact tab and WhatsApp
+
+The public site has a Contact tab and a floating WhatsApp button on every page. The tab lists three WhatsApp numbers. Tapping one opens a chat with a short message already written ("Hi, I'm a user from Moon Radar...").
+
+Under it, "Suggest or upload working hosts" lets visitors enter hosts, country, carrier and the app and mode they tested with. WhatsApp then opens with a ready-made message listing the hosts (up to 40). After a Phone test, the "Suggest these on WhatsApp" button fills the form with the reachable hosts. Each host's detail sheet also has "Report on WhatsApp". Messages go through WhatsApp, not through this server.
+
+To change the numbers, edit the `WHATSAPP` list near the top of `public/app.js` (digits only, with country code).
+
+## Footer
+
+Every public page ends with a site footer: about Moon Radar with the live host count and last test time, quick links, the three WhatsApp numbers, a short "How it works", an FAQ, and Disclaimer, Privacy and Terms of use sections that expand when tapped, plus the copyright line. The text lives in `renderFooter()` in `public/app.js`.

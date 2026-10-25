@@ -13,6 +13,7 @@ const gen = require('./lib/payloads');
 const tools = require('./lib/tools');
 const convert = require('./lib/convert');
 const sniffer = require('./lib/sniff');
+const cloud = require('./lib/cloud');
 const { COUNTRIES, CARRIERS, inferCountry } = require('./lib/seeds');
 
 const PORT = parseInt(process.env.PORT, 10) || 8080;
@@ -67,6 +68,7 @@ function limited(req, key, max, windowMs) {
 setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (!v.some(t => now - t < 120000)) hits.delete(k); }, 120000).unref();
 
 // ---------- helpers ----------
+const clientIp = req => (TRUST_PROXY && req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim().replace(/^::ffff:/, '');
 const send = (res, code, data, headers = {}) => {
   const body = typeof data === 'string' ? data : JSON.stringify(data);
   res.writeHead(code, Object.assign({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, headers));
@@ -177,7 +179,12 @@ function restoreBackup(data) {
   }
   db.hosts = hosts;
   if (sources.length) db.sources = sources;
-  if (data.settings && typeof data.settings === 'object') applySettings(db.settings, data.settings);
+  if (data.settings && typeof data.settings === 'object') {
+    // The carrier label and zero-balance mode describe the device that ran the scan, so they stay local.
+    const s = Object.assign({}, data.settings);
+    delete s.carrier; delete s.zeroBalanceMode;
+    applySettings(db.settings, s);
+  }
   if (Array.isArray(data.runs)) db.runs = data.runs.slice(-60);
   if (data.meta && +data.meta.lastDaily) db.meta.lastDaily = +data.meta.lastDaily;
   store.save();
@@ -193,6 +200,7 @@ async function route(req, res, url, body) {
 
   // ---- public ----
   if (p === '/api/meta' && m === 'GET') return send(res, 200, publicMeta());
+  if (p === '/api/whoami' && m === 'GET') return send(res, 200, { ip: clientIp(req) || 'unknown' });
 
   if (p === '/api/hosts' && m === 'GET') {
     const list = filterHosts(Object.values(db.hosts).filter(isPublished), q);
@@ -408,6 +416,50 @@ async function route(req, res, url, body) {
       if (jobs.status().running) return send(res, 409, { error: 'A scan is running. Stop it or wait, then restore.' });
       try { return send(res, 200, restoreBackup(body)); } catch (e) { return send(res, 400, { error: e.message }); }
     }
+    if (p === '/api/admin/clouds' && m === 'GET') {
+      const now = Date.now();
+      return send(res, 200, Object.values(db.clouds).sort((a, b) => b.createdAt - a.createdAt).map(c => cloud.summary(c, now)));
+    }
+    if (p === '/api/admin/clouds' && m === 'POST') {
+      if (Object.keys(db.clouds).length >= 500) return send(res, 400, { error: 'You have 500 cloud configs. Delete some old ones first.' });
+      try {
+        const c = cloud.create(body);
+        db.clouds[c.token] = c;
+        store.save();
+        jobs.log(`Cloud config created: ${c.name}`);
+        return send(res, 200, cloud.summary(c));
+      } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    mm = /^\/api\/admin\/clouds\/([A-Za-z0-9_-]+)$/.exec(p);
+    if (mm) {
+      const c = db.clouds[mm[1]];
+      if (!c) return send(res, 404, { error: 'Cloud config not found' });
+      if (m === 'DELETE') { delete db.clouds[mm[1]]; store.save(); return send(res, 200, { ok: true }); }
+      if (m === 'POST') {
+        const now = Date.now();
+        if (body.action === 'revoke') c.revoked = true;
+        else if (body.action === 'restore') c.revoked = false;
+        else if (body.action === 'extend') {
+          let mins;
+          try { mins = cloud.minutesFrom({ minutes: body.minutes }); } catch (e) { return send(res, 400, { error: e.message }); }
+          if (c.expiresAt) c.expiresAt = Math.max(now, c.expiresAt) + mins * 60000; else c.durationMin += mins;
+        } else return send(res, 400, { error: 'Unknown action' });
+        store.save();
+        return send(res, 200, cloud.summary(c, now));
+      }
+    }
+
+    if (p === '/api/admin/verify' && m === 'POST') {
+      const carrier = String(body.carrier || '').trim().slice(0, 30);
+      if (!carrier) return send(res, 400, { error: 'Enter the carrier name, for example Econet' });
+      const now = Date.now();
+      let n = 0;
+      const mark = (list, ok) => { for (const name of Array.isArray(list) ? list.slice(0, 2000) : []) { const h = db.hosts[probe.cleanHost(name)]; if (h) { h.verified[carrier] = { ok, t: now }; n++; } } };
+      mark(body.working, true); mark(body.failed, false);
+      store.save();
+      jobs.log(`Phone test on ${carrier}: ${n} hosts marked`);
+      return send(res, 200, { marked: n });
+    }
     if (p === '/api/admin/stop' && m === 'POST') { jobs.stop(); return send(res, 200, { ok: true }); }
 
     if (p === '/api/admin/settings' && m === 'GET') { const s = Object.assign({}, db.settings); delete s.adminHash; delete s.adminPath; return send(res, 200, s); }
@@ -430,6 +482,41 @@ async function route(req, res, url, body) {
   return send(res, 404, { error: 'Not found' });
 }
 
+const plain = (res, code, text) => { res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(text + '\n'); };
+
+function serveCloud(req, res, url) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
+  if (limited(req, 'cloud', 120, 60000)) return plain(res, 429, 'Too many requests. Try again in a minute.');
+  const token = decodeURIComponent(url.pathname.slice(3)).replace(/\/+$/, '');
+  const c = /^[A-Za-z0-9_-]{16,64}$/.test(token) ? db.clouds[token] : null;
+  const now = Date.now();
+  if (!c) return plain(res, 404, 'Config not found.');
+  const st = cloud.status(c, now);
+  if (st === 'revoked') return plain(res, 410, 'This config was withdrawn by its owner.');
+  if (st === 'expired') return plain(res, 410, `This config expired on ${new Date(c.expiresAt).toUTCString()}.`);
+  if (st === 'used up') return plain(res, 410, 'This config reached its open limit.');
+  const fmt = (url.searchParams.get('f') || '').toLowerCase();
+  if (!fmt && /text\/html/.test(req.headers.accept || '')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' });
+    return res.end(req.method === 'HEAD' ? '' : cloud.card(c, now));
+  }
+  if (req.method === 'GET') { cloud.activate(c, now); c.opens++; store.save(); }
+  const out = cloud.render(c, fmt);
+  if (out.error) return plain(res, 400, out.error);
+  res.writeHead(200, Object.assign({ 'Content-Type': out.type }, cloud.headers(c)));
+  res.end(req.method === 'HEAD' ? '' : out.body);
+}
+
+function pruneClouds() {
+  const cutoff = Date.now() - 30 * 86400000;
+  let n = 0;
+  for (const [k, c] of Object.entries(db.clouds)) {
+    const st = cloud.status(c);
+    if ((st === 'expired' && c.expiresAt < cutoff) || (st === 'revoked' && c.createdAt < cutoff) || (st === 'used up' && c.createdAt < cutoff)) { delete db.clouds[k]; n++; }
+  }
+  if (n) { store.save(); jobs.log(`Removed ${n} old cloud configs`); }
+}
+
 function serveStatic(req, res, url) {
   let f = decodeURIComponent(url.pathname);
   const isAdminPage = f.replace(/\/+$/, '') === adminUrl();
@@ -447,6 +534,7 @@ function serveStatic(req, res, url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
+    if (url.pathname.startsWith('/c/')) return serveCloud(req, res, url);
     if (url.pathname.startsWith('/api/')) {
       const big = url.pathname === '/api/admin/restore';
       if (big && !isAdmin(req)) return send(res, 401, { error: 'Sign in required' });
@@ -463,6 +551,8 @@ if (require.main === module) {
   server.listen(PORT, HOST, () => {
     console.log(`Moon Radar running on http://localhost:${PORT}`);
     jobs.startScheduler();
+    pruneClouds();
+    setInterval(pruneClouds, 3600000).unref();
   });
   const bye = () => { store.flush(); process.exit(0); };
   process.on('SIGINT', bye);

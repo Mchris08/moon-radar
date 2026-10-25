@@ -338,12 +338,90 @@ async function t(name, fn) {
   await t('restore rejects garbage and needs login', async () => {
     assert.strictEqual((await call('/admin/restore', { method: 'POST', body: {} })).status, 401);
     assert.strictEqual((await call('/admin/restore', { method: 'POST', token, body: { hello: 1 } })).status, 400);
-    const evil = { format: 'moon-radar-backup', hosts: { 'good.example.co.zw': { country: 'ZW', review: 'approved', working: true, score: 9999, history: 'x' }, '<script>': { country: 'ZW' } }, settings: { adminHash: 'hacked', retestHour: 99 } };
+    db.settings.carrier = ''; db.settings.zeroBalanceMode = false;
+    const evil = { format: 'moon-radar-backup', hosts: { 'good.example.co.zw': { country: 'ZW', review: 'approved', working: true, score: 9999, history: 'x' }, '<script>': { country: 'ZW' } }, settings: { adminHash: 'hacked', retestHour: 99, carrier: 'Econet', zeroBalanceMode: true } };
     const hashBefore = db.settings.adminHash;
     const r = await call('/admin/restore', { method: 'POST', token, body: evil });
     assert.strictEqual(r.status, 200); assert.strictEqual(r.data.hosts, 1);
     assert.strictEqual(db.hosts['good.example.co.zw'].score, 100);
+    assert.strictEqual(db.settings.carrier, '', 'restore must not copy the carrier label'); assert.strictEqual(db.settings.zeroBalanceMode, false, 'restore must not copy zero-balance mode');
     assert.strictEqual(db.settings.adminHash, hashBefore); assert.strictEqual(db.settings.retestHour, 23);
+  });
+  await t('whoami returns only the caller\'s own address', async () => { const r = await call('/whoami'); assert.strictEqual(r.status, 200); assert.ok(typeof r.data.ip === 'string' && r.data.ip.length > 0); });
+  await t('admin can mark hosts as tested on a carrier from a phone test', async () => {
+    assert.strictEqual((await call('/admin/verify', { method: 'POST', body: { carrier: 'Econet' } })).status, 401);
+    assert.strictEqual((await call('/admin/verify', { method: 'POST', token, body: { working: ['good.example.co.zw'] } })).status, 400);
+    const r = await call('/admin/verify', { method: 'POST', token, body: { carrier: 'Econet', working: ['good.example.co.zw', 'unknown.example.com'], failed: [] } });
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.data.marked, 1);
+    assert.strictEqual(db.hosts['good.example.co.zw'].verified.Econet.ok, true);
+    await call('/admin/verify', { method: 'POST', token, body: { carrier: 'Econet', failed: ['good.example.co.zw'] } });
+    assert.strictEqual(db.hosts['good.example.co.zw'].verified.Econet.ok, false);
+  });
+  await t('cloud configs: create, serve with expiry header, hide behind login', async () => {
+    const L1 = 'vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?encryption=none&security=tls&sni=bug.econet.co.zw&type=ws&host=bug.econet.co.zw&path=%2Fws#Econet';
+    const L2 = 'trojan://pw@s.example.com:443?security=tls&sni=x.netone.co.zw&type=ws#Econet';
+    assert.strictEqual((await call('/admin/clouds')).status, 401);
+    assert.strictEqual((await call('/admin/clouds', { method: 'POST', body: { links: L1, duration: { value: 1, unit: 'days' } } })).status, 401);
+    assert.strictEqual((await call('/admin/clouds', { method: 'POST', token, body: { links: '', duration: { value: 1, unit: 'days' } } })).status, 400);
+    assert.strictEqual((await call('/admin/clouds', { method: 'POST', token, body: { links: L1, duration: { value: 1, unit: 'minutes' } } })).status, 400);
+    const made = await call('/admin/clouds', { method: 'POST', token, body: { name: 'Friends', links: L1 + '\n' + L2, duration: { value: 2, unit: 'days' } } });
+    assert.strictEqual(made.status, 200); assert.strictEqual(made.data.status, 'active');
+    assert.ok(Math.abs((made.data.expiresAt - made.data.createdAt) - 2 * 86400000) < 1000);
+    const tk = made.data.token;
+    const r = await fetch(base + '/c/' + tk);
+    assert.strictEqual(r.status, 200); assert.ok(r.headers.get('content-type').startsWith('text/plain'));
+    assert.strictEqual(r.headers.get('cache-control'), 'no-store');
+    assert.strictEqual(r.headers.get('subscription-userinfo'), `upload=0; download=0; total=0; expire=${Math.floor(made.data.expiresAt / 1000)}`);
+    assert.deepStrictEqual(Buffer.from(await r.text(), 'base64').toString().split('\n'), [L1, L2]);
+    assert.ok((await (await fetch(base + '/c/' + tk + '?f=clash')).text()).split('proxies:').length === 2);
+    assert.strictEqual(JSON.parse(await (await fetch(base + '/c/' + tk + '?f=singbox')).text()).outbounds.length, 2);
+    assert.strictEqual((await fetch(base + '/c/' + tk + '?f=nope')).status, 400);
+    const list = await call('/admin/clouds', { token });
+    assert.ok(list.data.find(x => x.token === tk).opens >= 3);
+    assert.ok(!JSON.stringify(list.data).includes('vpn.example.com'), 'the admin list must not leak the config');
+  });
+  await t('cloud configs: expired, revoked and used-up links stop working', async () => {
+    const L = 'vless://11111111-2222-3333-4444-555555555555@v.example.com:443?security=tls&sni=a.co.zw&type=ws#a';
+    const mk = async extra => (await call('/admin/clouds', { method: 'POST', token, body: Object.assign({ links: L, duration: { value: 1, unit: 'hours' } }, extra) })).data.token;
+    const a = await mk({});
+    db.clouds[a].expiresAt = Date.now() - 1000;
+    let r = await fetch(base + '/c/' + a); assert.strictEqual(r.status, 410); assert.ok((await r.text()).includes('expired'));
+    const b = await mk({});
+    assert.strictEqual((await call('/admin/clouds/' + b, { method: 'POST', token, body: { action: 'revoke' } })).data.status, 'revoked');
+    assert.strictEqual((await fetch(base + '/c/' + b)).status, 410);
+    await call('/admin/clouds/' + b, { method: 'POST', token, body: { action: 'restore' } });
+    assert.strictEqual((await fetch(base + '/c/' + b)).status, 200);
+    const c = await mk({ maxOpens: 2 });
+    assert.strictEqual((await fetch(base + '/c/' + c)).status, 200); assert.strictEqual((await fetch(base + '/c/' + c)).status, 200);
+    r = await fetch(base + '/c/' + c); assert.strictEqual(r.status, 410); assert.ok((await r.text()).includes('limit'));
+    const ex = await call('/admin/clouds/' + a, { method: 'POST', token, body: { action: 'extend', minutes: 120 } });
+    assert.strictEqual(ex.data.status, 'active'); assert.strictEqual((await fetch(base + '/c/' + a)).status, 200);
+    assert.strictEqual((await call('/admin/clouds/' + a, { method: 'POST', token, body: { action: 'extend', minutes: 1 } })).status, 400);
+    assert.strictEqual((await call('/admin/clouds/' + a, { method: 'DELETE', token })).status, 200);
+    assert.strictEqual((await fetch(base + '/c/' + a)).status, 404);
+    assert.strictEqual((await fetch(base + '/c/not-a-real-token-123456')).status, 404);
+  });
+  await t('cloud configs: timer can start on first use; browser preview does not start or use it', async () => {
+    const created = await call('/admin/clouds', { method: 'POST', token, body: { ssh: { host: '1.2.3.4', port: 443, user: 'moon', password: 'pw1', sni: 'bug.econet.co.zw' }, duration: { value: 6, unit: 'hours' }, startOnFirstUse: true, maxOpens: 5 } });
+    assert.strictEqual(created.data.status, 'waiting'); assert.strictEqual(created.data.expiresAt, null);
+    const tk = created.data.token;
+    const page = await fetch(base + '/c/' + tk, { headers: { Accept: 'text/html' } });
+    assert.ok(page.headers.get('content-type').startsWith('text/html')); assert.ok((await page.text()).includes('SSH settings'));
+    assert.strictEqual(db.clouds[tk].opens, 0); assert.strictEqual(db.clouds[tk].expiresAt, null);
+    const txt = await (await fetch(base + '/c/' + tk)).text();
+    assert.ok(txt.includes('Server: 1.2.3.4') && txt.includes('Username: moon') && txt.includes('SNI: bug.econet.co.zw'));
+    assert.strictEqual(db.clouds[tk].opens, 1); assert.ok(Math.abs(db.clouds[tk].expiresAt - Date.now() - 6 * 3600000) < 5000);
+    assert.strictEqual(JSON.parse(await (await fetch(base + '/c/' + tk + '?f=json')).text()).username, 'moon');
+  });
+  await t('cloud configs: the browser page escapes hostile names', async () => {
+    const L = 'vless://11111111-2222-3333-4444-555555555555@v.example.com:443?security=tls&sni=a.co.zw&type=ws#a';
+    const tk = (await call('/admin/clouds', { method: 'POST', token, body: { name: '<script>alert(1)</script>', links: L, duration: { value: 1, unit: 'days' } } })).data.token;
+    const html = await (await fetch(base + '/c/' + tk, { headers: { Accept: 'text/html' } })).text();
+    assert.ok(!html.includes('<script>alert(1)</script>') && html.includes('&lt;script&gt;'));
+  });
+  await t('cloud configs are left out of backups', async () => {
+    const b = await call('/admin/backup', { token });
+    assert.ok(!('clouds' in b.data) && !JSON.stringify(b.data).includes('vpn.example.com'));
   });
   await t('static files are served and traversal is blocked', async () => {
     const r = await fetch(base + '/'); assert.strictEqual(r.status, 200); assert.ok((await r.text()).includes('Radar'));

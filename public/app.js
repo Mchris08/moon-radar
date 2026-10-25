@@ -43,6 +43,30 @@ function ago(t) {
   if (s < 86400) return Math.floor(s / 3600) + ' h ago';
   return Math.floor(s / 86400) + ' d ago';
 }
+// ---------- WhatsApp ----------
+const WHATSAPP = [
+  { number: '263781929228', label: '+263 78 192 9228' },
+  { number: '263717009508', label: '+263 71 700 9508' },
+  { number: '263790079259', label: '+263 79 007 9259' }
+];
+const WA_SVG = size => `<svg width="${size}" height="${size}" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3C8.8 3 3 8.8 3 16c0 2.5.7 4.8 1.9 6.8L3 29l6.4-1.9A12.9 12.9 0 0 0 16 29c7.2 0 13-5.8 13-13S23.2 3 16 3z" fill="#25D366"/><path d="M21.5 19.4c-.3-.2-1.8-.9-2.1-1s-.5-.1-.7.1-.8 1-1 1.2-.4.2-.7.1a8.5 8.5 0 0 1-4.2-3.7c-.3-.5.3-.5.9-1.6.1-.2.1-.4 0-.5l-1-2.3c-.2-.6-.5-.5-.7-.5h-.6a1.2 1.2 0 0 0-.9.4 3.7 3.7 0 0 0-1.1 2.7 6.4 6.4 0 0 0 1.3 3.4 14.6 14.6 0 0 0 5.6 4.9c2 .9 2.8.9 3.8.8a3.2 3.2 0 0 0 2.1-1.5 2.6 2.6 0 0 0 .2-1.5c-.1-.1-.3-.2-.6-.4z" fill="#fff"/></svg>`;
+
+const waLink = (number, text) => `https://wa.me/${number}?text=${encodeURIComponent(text)}`;
+function waIcon(size = 24) { const s = h('span', { 'aria-hidden': 'true', style: 'display:inline-flex' }); s.innerHTML = WA_SVG(size); return s; }
+const HELLO = "Hi, I'm a user from Moon Radar. I need help with: ";
+
+/** The WhatsApp message for "suggest or upload working hosts". */
+function buildSuggestMessage(f, countries = {}) {
+  const hosts = [...new Set(String(f.hosts || '').split(/[\s,;]+/).map(x => x.trim().toLowerCase().replace(/^https?:\/\//, '').split(/[\/:]/)[0]).filter(x => /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?\.[a-z]{2,}$/.test(x)))].slice(0, 40);
+  const lines = ["Hi, I'm a user from Moon Radar.", hosts.length > 1 ? 'I want to suggest working hosts.' : 'I want to suggest a working host.'];
+  if (f.country) lines.push('Country: ' + (countries[f.country] || f.country));
+  if (String(f.carrier || '').trim()) lines.push('Carrier: ' + String(f.carrier).trim().slice(0, 40));
+  if (String(f.mode || '').trim()) lines.push('Tested with: ' + String(f.mode).trim().slice(0, 60));
+  lines.push('Hosts:', ...hosts.map(x => '- ' + x));
+  if (String(f.note || '').trim()) lines.push('Note: ' + String(f.note).trim().slice(0, 200));
+  return { text: lines.join('\n'), count: hosts.length };
+}
+
 const typeLabel = { sni: 'SNI', payload: 'Payload', ws: 'WebSocket' };
 const protoLabel = { 'sni-ssl': 'SSL/SNI', 'xray-tls': 'VLESS/VMess/Trojan', 'ws-tls': 'WS+TLS', grpc: 'gRPC', reality: 'Reality', 'http-payload': 'HTTP payload', 'ws-http': 'WS (HTTP)' };
 
@@ -140,6 +164,7 @@ async function openHost(host) {
   try {
     const d = await api('/hosts/' + encodeURIComponent(host));
     clear(body);
+    const phoneRes = h('div', { class: 'small' });
     const hist = h('div', { class: 'hist', 'aria-label': 'Test history' }, d.history.map(x => h('i', { class: x.ok ? 'up' : '', title: new Date(x.t).toLocaleString() })));
     body.append(h('div', null,
       h('div', { class: 'sheet-head' }, h('div', null, h('h3', { class: 'mono' }, d.host), h('div', { class: 'muted small' }, `${flag(d.country)} ${state.meta.countries[d.country] || d.country}${d.carriers.length ? ' · ' + d.carriers.join(', ') : ''}`)), bars(d.score, d.working)),
@@ -151,22 +176,25 @@ async function openHost(host) {
       d.uptime != null ? h('div', { class: 'small muted' }, `${d.uptime}% of recent tests passed. Last tested ${ago(d.lastTested)}.`) : null,
       h('div', { class: 'row-actions' },
         h('button', { class: 'btn', onclick: () => copy(d.host) }, 'Copy host'),
+        h('a', { class: 'btn', href: waLink(WHATSAPP[0].number, `Hi, I'm a user from Moon Radar.\nAbout this host: ${d.host}\nOn my connection it is (working / not working).\nCarrier: `), target: '_blank', rel: 'noopener' }, 'Report on WhatsApp'),
+        h('button', { class: 'btn', onclick: async e => { const b = e.target; b.disabled = true; b.textContent = 'Testing'; const r = await phoneTest(d.host); b.disabled = false; b.textContent = 'Test on my connection'; clear(phoneRes).append(h('span', { class: r.ok ? 'ok-msg' : 'err' }, r.ok ? `Reached from this phone in ${r.ms} ms` : r.timeout ? 'No answer from this phone. Likely blocked on this connection.' : 'Could not connect from this phone.')); } }, 'Test on my connection'),
         h('button', { class: 'btn primary', onclick: () => { dlg.close(); state.toolsTab = 'payload'; state.prefillHost = d.host; location.hash = '#/tools'; route(); } }, 'Payloads and configs'),
         state.token ? h('button', { class: 'btn', onclick: async e => { e.target.disabled = true; try { await api('/admin/hosts/' + encodeURIComponent(d.host), { method: 'POST' }); toast('Re-tested'); openHost(d.host); } catch (err) { toast(err.message); } } }, 'Re-test now') : null,
-        h('button', { class: 'btn', onclick: () => dlg.close() }, 'Close'))));
+        h('button', { class: 'btn', onclick: () => dlg.close() }, 'Close')),
+      phoneRes));
   } catch (e) { clear(body).append(h('div', { class: 'err' }, e.message), h('button', { class: 'btn', onclick: () => dlg.close() }, 'Close')); }
 }
 $('#sheet').addEventListener('click', e => { if (e.target === $('#sheet')) $('#sheet').close(); });
 
 // ---------- tools ----------
 function viewTools() {
-  const TABS = [['sni', 'SNI sniffer'], ['bulk', 'Bulk test'], ['check', 'Check host'], ['subdomains', 'Subdomains'], ['snicheck', 'SNI check'], ['dns', 'DNS'], ['ports', 'Ports'], ['convert', 'Converter'], ['payload', 'Payloads']];
+  const TABS = [['sni', 'SNI sniffer'], ['phone', 'Phone test'], ['bulk', 'Bulk test'], ['check', 'Check host'], ['subdomains', 'Subdomains'], ['snicheck', 'SNI check'], ['dns', 'DNS'], ['ports', 'Ports'], ['convert', 'Converter'], ['payload', 'Payloads']];
   const wrap = h('div');
   const bar = h('div', { class: 'tabs', role: 'group', 'aria-label': 'Tool' }, TABS.map(([k, l]) => h('button', { class: 'tab', 'aria-pressed': String(state.toolsTab === k), onclick: () => { state.toolsTab = k; viewTools(); } }, l)));
   const body = h('div');
   wrap.append(bar, body);
   clear(app).append(wrap);
-  ({ sni: toolSniff, snicheck: toolSniCheck, subdomains: toolSubdomains, check: toolCheck, bulk: toolBulk, dns: toolDns, ports: toolPorts, convert: toolConvert, payload: toolPayload })[state.toolsTab](body);
+  ({ sni: toolSniff, phone: toolPhone, snicheck: toolSniCheck, subdomains: toolSubdomains, check: toolCheck, bulk: toolBulk, dns: toolDns, ports: toolPorts, convert: toolConvert, payload: toolPayload })[state.toolsTab](body);
 }
 
 function toolCheck(body) {
@@ -445,16 +473,162 @@ function toolConvert(body) {
     h('p', { class: 'small muted' }, 'Turns a link into Xray, sing-box and Clash configs, and swaps the bug host if you set one. Nothing is saved.')), out);
 }
 
+// ---------- phone test (runs in this browser, on this device's connection) ----------
+async function phoneProbe(host, timeoutMs) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const t0 = performance.now();
+  try {
+    // no-cors: we cannot read the reply, but the promise only resolves if DNS, TCP and TLS all worked.
+    await fetch('https://' + host + '/?mr=' + Math.random().toString(36).slice(2), { mode: 'no-cors', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'manual', signal: ctl.signal });
+    return { ok: true, ms: Math.round(performance.now() - t0) };
+  } catch (e) {
+    return { ok: false, ms: Math.round(performance.now() - t0), timeout: ctl.signal.aborted };
+  } finally { clearTimeout(timer); }
+}
+async function phoneTest(host) {
+  let r = await phoneProbe(host, 7000);
+  if (!r.ok && !r.timeout) r = await phoneProbe(host, 7000);   // a fast failure may be a one-off DNS hiccup
+  return r;
+}
+
+function toolPhone(body) {
+  const ipLine = h('span', null, 'Checking this connection');
+  api('/whoami').then(d => { clear(ipLine).append(`This connection's public IP: ${d.ip}. Turn Wi-Fi off and reopen this tab: the IP changes when you are on mobile data.`); }).catch(() => { clear(ipLine).append(''); });
+  const ta = h('textarea', { placeholder: 'host1.example.com\nhost2.example.com', 'aria-label': 'Hosts to test' });
+  const out = h('div');
+  let stop = false, pendingSet = null;
+  const loader = (label, fn, pending) => h('button', { class: 'btn sm', style: 'margin:6px 6px 0 0', onclick: async () => { try { const list = await fn(); ta.value = list.join('\n'); pendingSet = pending ? new Set(list) : null; toast(list.length + ' hosts loaded'); } catch (e) { toast(e.message); } } }, label);
+  const go = async () => {
+    const names = [...new Set(ta.value.split(/[\s,;]+/).map(x => x.trim().toLowerCase().replace(/^https?:\/\//, '').split(/[\/:]/)[0]).filter(x => /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?\.[a-z]{2,}$/.test(x)))].slice(0, 300);
+    if (!names.length) { clear(out).append(h('div', { class: 'err' }, 'Paste or load at least one host')); return; }
+    stop = false;
+    const results = [];
+    const prog = h('i'), sumEl = h('div', { class: 'small muted' }), list = h('div', { class: 'ledger' });
+    const actions = h('div');
+    const stopBtn = h('button', { class: 'btn danger sm', onclick: () => { stop = true; } }, 'Stop');
+    const stopRow = h('div', { class: 'row-actions' }, stopBtn);
+    clear(out).append(h('div', null, h('div', { class: 'progress' }, prog), sumEl, stopRow, actions, list));
+    const paint = () => {
+      const ok = results.filter(r => r.ok).length;
+      prog.style.width = Math.round(100 * results.length / names.length) + '%';
+      sumEl.textContent = `${results.length} of ${names.length} tested, ${ok} reachable from this phone`;
+      clear(list).append(...results.slice().sort((a, b) => (b.ok - a.ok) || a.ms - b.ms).map(r =>
+        h('div', { class: 'item', style: 'grid-template-columns:1fr auto;cursor:default' }, h('div', { class: 'host' }, r.host), h('div', null, h('span', { class: 'chip ' + (r.ok ? 'ok' : 'no') }, r.ok ? `reachable ${r.ms} ms` : r.timeout ? 'no answer' : 'failed')))));
+    };
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(6, names.length) }, async () => {
+      while (i < names.length && !stop) { const host = names[i++]; const r = await phoneTest(host); results.push(Object.assign({ host }, r)); paint(); }
+    }));
+    const okList = results.filter(r => r.ok).map(r => r.host);
+    const badList = results.filter(r => !r.ok).map(r => r.host);
+    const carrier = h('input', { type: 'text', placeholder: 'Carrier you are on, e.g. Econet', 'aria-label': 'Carrier' });
+    const approvable = pendingSet ? okList.filter(x => pendingSet.has(x)) : [];
+    clear(stopRow).append(h('div', { class: 'row-actions', style: 'margin:0' }, h('button', { class: 'btn primary', disabled: !okList.length, onclick: () => copy(okList.join('\n')) }, `Copy ${okList.length} reachable`),
+      okList.length ? h('button', { class: 'btn', onclick: () => { state.prefillSuggest = { hosts: okList.join('\n') }; location.hash = '#/contact'; } }, 'Suggest these on WhatsApp') : null));
+    if (state.token && results.length) {
+      clear(actions).append(h('div', { class: 'panel' }, h('b', null, 'Admin'), h('div', { class: 'small muted' }, 'Save these results on the hosts as tested from this carrier. Only do this while connected through that carrier.'), carrier,
+        h('div', { class: 'row-actions' },
+          h('button', { class: 'btn', onclick: async () => { try { const r = await api('/admin/verify', { method: 'POST', body: { carrier: carrier.value, working: okList, failed: badList } }); toast(`${r.marked} hosts marked`); } catch (e) { toast(e.message); } } }, 'Save as tested on this carrier'),
+          approvable.length ? h('button', { class: 'btn primary', onclick: async () => { try { const r = await api('/admin/review', { method: 'POST', body: { action: 'approve', hosts: approvable } }); toast(`${r.changed} approved`); } catch (e) { toast(e.message); } } }, `Approve ${approvable.length} reachable`) : null)));
+    }
+  };
+  body.append(h('div', { class: 'panel' }, h('label', { class: 'f' }, 'Hosts (one per line, up to 300)'), ta,
+    h('div', null,
+      loader('Load Zimbabwe hosts', async () => (await api('/hosts?country=ZW&limit=500')).hosts.map(x => x.host)),
+      loader('Load all published', async () => (await api('/hosts?limit=500')).hosts.map(x => x.host)),
+      state.token ? loader('Load waiting for review', async () => (await api('/admin/hosts?review=pending&working=1&country=ZW&limit=300')).hosts.map(x => x.host), true) : null),
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: go }, 'Test from this phone')),
+    h('div', { class: 'small muted' }, ipLine),
+    h('div', { class: 'notice' }, 'This runs in your browser, on whatever connection this phone is using right now. To test a carrier, turn off Wi-Fi and use that carrier\'s mobile data.'),
+    h('p', { class: 'small muted' }, 'Reachable means DNS, TCP and a valid TLS handshake all worked from this phone. A host with an invalid certificate shows as failed even though an SNI tunnel might still use it. Chrome\'s Secure DNS can bypass your carrier\'s DNS, and browsers may use HTTP/3 over UDP, so confirm a winner in your tunnel app before relying on it.')), out);
+}
+
+// ---------- contact (WhatsApp) ----------
+function viewContact() {
+  const countries = state.meta.countries;
+  const f = Object.assign({ hosts: '', country: 'ZW', carrier: '', mode: '', note: '' }, state.prefillSuggest || {});
+  state.prefillSuggest = null;
+  let to = WHATSAPP[0].number;
+  const preview = h('div', { class: 'msg-preview' });
+  const fieldText = (label, key, ph) => h('div', null, h('label', { class: 'f' }, label), h('input', { type: 'text', placeholder: ph, value: f[key], oninput: e => { f[key] = e.target.value; update(); } }));
+  const update = () => { const m = buildSuggestMessage(f, countries); clear(preview).append(m.count ? m.text : 'Add at least one host to see your message.'); return m; };
+  const hosts = h('textarea', { placeholder: 'host1.example.com\nhost2.example.com', 'aria-label': 'Hosts', oninput: e => { f.hosts = e.target.value; update(); } });
+  hosts.value = f.hosts;
+  const country = h('select', { 'aria-label': 'Country', onchange: e => { f.country = e.target.value; update(); } }, Object.entries(countries).sort((a, b) => (b[0] === 'ZW') - (a[0] === 'ZW') || a[1].localeCompare(b[1])).map(([c, n]) => h('option', { value: c, selected: c === f.country }, n)));
+  const toSel = h('select', { 'aria-label': 'Send to', onchange: e => { to = e.target.value; } }, WHATSAPP.map(w => h('option', { value: w.number }, w.label)));
+  const msg = h('div');
+  const send = () => {
+    const m = update();
+    if (!m.count) { clear(msg).append(h('div', { class: 'err' }, 'Add at least one valid host name first')); return; }
+    clear(msg);
+    const url = waLink(to, m.text);
+    const w = window.open(url, '_blank', 'noopener');
+    if (!w) location.href = url;
+  };
+  clear(app).append(h('div', null,
+    h('div', { class: 'panel' }, h('div', { style: 'display:flex;align-items:center;gap:10px' }, waIcon(30), h('h2', null, 'Chat on WhatsApp')),
+      h('p', { class: 'muted small' }, 'Tap a number. WhatsApp opens with a short message already written to say you are a Moon Radar user.'),
+      h('div', { class: 'wa-list' }, WHATSAPP.map(w => h('a', { class: 'wa-btn', href: waLink(w.number, HELLO), target: '_blank', rel: 'noopener' }, waIcon(28), h('span', null, w.label, h('small', null, 'Tap to chat')), h('span', { class: 'go' }, 'Chat'))))),
+    h('div', { class: 'panel' }, h('h2', null, 'Suggest or upload working hosts'),
+      h('p', { class: 'muted small' }, 'Found hosts that work on your connection? Send them to us. We test them and add the good ones. Fill in the form and WhatsApp opens with the message ready to send.'),
+      h('label', { class: 'f' }, 'Hosts (one per line, up to 40)'), hosts,
+      h('div', { class: 'two' }, h('div', null, h('label', { class: 'f' }, 'Country'), country), fieldText('Carrier', 'carrier', 'Econet, NetOne...')),
+      fieldText('App and mode', 'mode', 'HA Tunnel, SNI'), fieldText('Note (optional)', 'note', 'Works only at night, uses no data...'),
+      h('label', { class: 'f' }, 'Send to'), toSel,
+      h('div', { class: 'small muted', style: 'margin-top:10px' }, 'Your message:'), preview,
+      msg, h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: send }, 'Send on WhatsApp')),
+      h('p', { class: 'small muted' }, 'Only share hosts you tested on your own connection. Say which carrier and app you used. The message goes through WhatsApp, not through this website.'))));
+  update();
+}
+
+// ---------- footer ----------
+function renderFooter() {
+  const el = $('#footer');
+  if (!el) return;
+  const m = state.meta;
+  const link = (href, text) => h('a', { href }, text);
+  const acc = (title, ...kids) => h('details', null, h('summary', null, title), h('div', { class: 'body' }, kids));
+  const qa = (q, a) => [h('div', { class: 'q' }, q), h('p', null, a)];
+  clear(el).append(h('div', { class: 'in' },
+    h('div', { class: 'cols' },
+      h('div', null, h('h3', null, 'Moon Radar'),
+        h('p', null, 'Finds and tests SNI and bug hosts for VPN tunnelling, with a focus on Zimbabwe. Hosts are rechecked about once a day, and Zimbabwe hosts are reviewed by an admin before they are published.'),
+        m ? h('p', null, `${m.total} working hosts${m.lastDaily ? ' · last full test ' + ago(m.lastDaily) : ''}`) : null),
+      h('div', null, h('h3', null, 'Quick links'),
+        h('ul', null, h('li', null, link('#/', 'Hosts')), h('li', null, link('#/tools', 'Tools')), h('li', null, link('#/tools', 'Phone test')), h('li', null, link('#/contact', 'Suggest a host')), h('li', null, link('#/contact', 'Contact us')))),
+      h('div', null, h('h3', null, 'Chat on WhatsApp'),
+        h('ul', null, WHATSAPP.map(w => h('li', null, h('a', { class: 'fwa', href: waLink(w.number, HELLO), target: '_blank', rel: 'noopener' }, waIcon(22), w.label)))))),
+    acc('How it works',
+      h('ol', { style: 'margin:0;padding:0' }, [
+        'Pick your country and carrier on the Hosts tab.',
+        'Open a host to see its strength, speed and the tunnelling modes it suits.',
+        'Test it from your own phone with "Test on my connection" or Tools, Phone test.',
+        'Use it in your tunnel app. You still need your own SSH or V2Ray server.'
+      ].map(t => h('li', null, t)))),
+    acc('FAQ',
+      qa('What is an SNI or bug host?', 'A website name your carrier treats specially, usually because it is zero-rated. A tunnel app puts that name in the SNI or Host field so the carrier sees it.'),
+      qa('Why does a host work for someone else but not for me?', 'Zero-rating differs by carrier, region and package. Radar tests from a server, so confirm on your own phone and SIM.'),
+      qa('How often are hosts tested?', 'About once a day. A host that stops answering is hidden until it comes back.'),
+      qa('Why do Zimbabwe hosts take longer to appear?', 'An admin checks them first, so only reviewed hosts are published.'),
+      qa('How do I suggest a host?', 'Open the Contact tab, fill in the form and send it on WhatsApp.'),
+      qa('Do I need a server?', 'Yes. A bug host only gets you past the carrier. Your tunnel app still needs an SSH or V2Ray server to carry the traffic.')),
+    acc('Disclaimer', h('p', null, 'Hosts are found automatically, from public sources and from user suggestions. A host can stop working at any time, and a working host is not a promise of free or unlimited data. Moon Radar is not affiliated with any mobile carrier. Use hosts in line with the law and your carrier\'s terms, and at your own risk.')),
+    acc('Privacy', h('p', null, 'You do not need an account. Phone tests run in your browser, and results stay on your device unless you share them. Messages you send through the WhatsApp buttons go through WhatsApp, not through this site. The hosting provider may keep standard server logs.')),
+    acc('Terms of use', h('p', null, 'Moon Radar is provided as is, with no guarantee that any host works. Hosts or features may be removed or changed at any time. Do not use it to break the law or to harm others.')),
+    h('div', { class: 'bottom' }, h('span', null, `\u00a9 ${new Date().getFullYear()} Moon Radar. Built by Mchris devs.`), h('a', { href: '#top', onclick: e => { e.preventDefault(); window.scrollTo(0, 0); } }, 'Back to top'))));
+}
+
 // ---------- admin ----------
 function viewAdmin() {
   if (!state.token) return adminLogin();
-  const tabs = [['review', 'Review'], ['hosts', 'Hosts'], ['sources', 'Sources'], ['jobs', 'Scans'], ['settings', 'Settings']];
+  const tabs = [['review', 'Review'], ['hosts', 'Hosts'], ['sources', 'Sources'], ['jobs', 'Scans'], ['cloud', 'Cloud'], ['settings', 'Settings']];
   const seg = h('div', { class: 'tabs', role: 'group' }, tabs.map(([k, l]) => h('button', { class: 'tab', 'aria-pressed': String(state.adminTab === k), onclick: () => { state.adminTab = k; viewAdmin(); } }, l)),
     h('button', { class: 'tab', onclick: () => { state.token = ''; localStorage.removeItem('radar_token'); route(); } }, 'Sign out'));
   const body = h('div');
   clear(app).append(seg, body);
   clearInterval(state.jobTimer);
-  ({ review: adminReview, hosts: adminHosts, sources: adminSources, jobs: adminJobs, settings: adminSettings })[state.adminTab](body);
+  ({ review: adminReview, hosts: adminHosts, sources: adminSources, jobs: adminJobs, cloud: adminCloud, settings: adminSettings })[state.adminTab](body);
 }
 
 function adminLogin() {
@@ -572,6 +746,66 @@ async function adminJobs(body) {
   state.jobTimer = setInterval(refresh, 3000);
 }
 
+async function adminCloud(body) {
+  const origin = location.origin || '';
+  const fmtLeft = ms => { if (ms <= 0) return 'expired'; const d = Math.floor(ms / 864e5), hh = Math.floor(ms % 864e5 / 36e5), m = Math.floor(ms % 36e5 / 6e4); return d ? `${d}d ${hh}h` : hh ? `${hh}h ${m}m` : `${m} min`; };
+  const f = { host: '', port: '443', user: '', password: '', sni: '', payload: '', note: '' };
+  const sf = (label, key, ph) => h('div', null, h('label', { class: 'f' }, label), h('input', { type: 'text', placeholder: ph || '', autocapitalize: 'none', value: f[key], oninput: e => { f[key] = e.target.value; } }));
+  const name = h('input', { type: 'text', placeholder: 'e.g. Friends pack', maxlength: '60', 'aria-label': 'Name' });
+  const links = h('textarea', { placeholder: 'vless://...\nvmess://...\ntrojan://...', 'aria-label': 'VPN links' });
+  const num = h('input', { type: 'number', value: '1', min: '1', 'aria-label': 'Duration' });
+  const unit = h('select', { 'aria-label': 'Unit' }, [['minutes', 'minutes'], ['hours', 'hours'], ['days', 'days']].map(([v, l]) => h('option', { value: v, selected: v === 'days' }, l)));
+  const quick = (label, n, u) => h('button', { class: 'btn sm', style: 'margin:6px 6px 0 0', onclick: () => { num.value = String(n); unit.value = u; } }, label);
+  const first = h('input', { type: 'checkbox', id: 'cfirst' });
+  const maxOpens = h('input', { type: 'number', min: '1', placeholder: 'no limit', 'aria-label': 'Open limit' });
+  const result = h('div'), list = h('div');
+  const ssh = h('details', { class: 'panel', style: 'margin:10px 0 0' }, h('summary', null, 'Add an SSH profile (HA Tunnel and similar)'),
+    sf('Server', 'host', 'server.example.com or an IP'), h('div', { class: 'two' }, sf('Port', 'port', '443'), sf('Username', 'user')), sf('Password', 'password'), sf('SNI (bug host)', 'sni', 'bug.example.com'),
+    h('label', { class: 'f' }, 'Payload (optional)'), h('textarea', { 'aria-label': 'Payload', style: 'min-height:60px', oninput: e => { f.payload = e.target.value; } }), sf('Note (optional)', 'note'));
+  const create = async () => {
+    try {
+      const payload = { name: name.value, links: links.value, duration: { value: num.value, unit: unit.value }, startOnFirstUse: first.checked, maxOpens: maxOpens.value || null };
+      if (f.host || f.user || f.password) payload.ssh = Object.assign({}, f);
+      const c = await api('/admin/clouds', { method: 'POST', body: payload });
+      const url = origin + '/c/' + c.token;
+      clear(result).append(h('div', { class: 'panel' }, h('b', null, 'Cloud config created'), h('pre', { class: 'code' }, url),
+        h('div', { class: 'small muted' }, c.expiresAt ? 'Expires ' + new Date(c.expiresAt).toLocaleString() : 'The timer starts when an app first opens the link.'),
+        h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: () => copy(url) }, 'Copy link'),
+          c.links ? h('button', { class: 'btn', onclick: () => copy(url + '?f=clash') }, 'Copy Clash link') : null,
+          c.links ? h('button', { class: 'btn', onclick: () => copy(url + '?f=singbox') }, 'Copy sing-box link') : null),
+        h('p', { class: 'small muted' }, 'Paste the link as a subscription URL in v2rayNG, NekoBox, Hiddify and similar apps. People who open it in a browser see a readable page. Opening it there does not use it up.')));
+      loadList();
+    } catch (e) { clear(result).append(h('div', { class: 'err' }, e.message)); }
+  };
+  body.append(h('div', { class: 'panel' }, h('b', null, 'Create cloud config'),
+    h('p', { class: 'small muted' }, 'Hosts your VPN config at a private link that stops working when the timer runs out.'),
+    h('label', { class: 'f' }, 'Name'), name, h('label', { class: 'f' }, 'VPN links (vless, vmess, trojan), one per line'), links, ssh,
+    h('label', { class: 'f' }, 'How long should it last?'), h('div', { class: 'two' }, num, unit),
+    h('div', null, quick('1 hour', 1, 'hours'), quick('1 day', 1, 'days'), quick('7 days', 7, 'days'), quick('30 days', 30, 'days')),
+    h('label', { class: 'f' }, first, ' Start the timer when an app first opens it'),
+    h('label', { class: 'f' }, 'Limit how many times apps can open it (optional)'), maxOpens,
+    h('div', { class: 'row-actions' }, h('button', { class: 'btn primary', onclick: create }, 'Create cloud config')),
+    h('div', { class: 'notice' }, 'Cloud configs live on this server. On a free host that restarts, they disappear. They are not included in backups because they hold your server logins.')), result, list);
+  async function loadList() {
+    try {
+      const rows = await api('/admin/clouds');
+      const now = Date.now();
+      const act = async (token, body2) => { try { await api('/admin/clouds/' + token, { method: 'POST', body: body2 }); loadList(); } catch (e) { toast(e.message); } };
+      clear(list).append(h('div', { class: 'panel' }, h('b', null, `Your cloud configs (${rows.length})`),
+        rows.length ? rows.map(c => h('div', { class: 'proto' },
+          h('div', null, h('b', null, c.name + ' '), h('span', { class: 'chip ' + (c.status === 'active' ? 'ok' : c.status === 'waiting' ? '' : 'no') }, c.status)),
+          h('div', { class: 'small muted' }, [c.status === 'active' ? fmtLeft(c.expiresAt - now) + ' left' : c.status === 'waiting' ? `starts on first use, then ${Math.round(c.durationMin / 60 * 10) / 10} h` : '', `${c.opens}${c.maxOpens ? ' of ' + c.maxOpens : ''} opens`, c.links ? c.links + ' link' + (c.links === 1 ? '' : 's') : '', c.ssh ? 'SSH profile' : ''].filter(Boolean).join(' · ')),
+          h('div', { class: 'row-actions' },
+            h('button', { class: 'btn sm', onclick: () => copy(origin + '/c/' + c.token) }, 'Copy link'),
+            h('button', { class: 'btn sm', onclick: () => act(c.token, { action: 'extend', minutes: 1440 }) }, '+1 day'),
+            h('button', { class: 'btn sm', onclick: () => act(c.token, { action: 'extend', minutes: 10080 }) }, '+7 days'),
+            h('button', { class: 'btn sm', onclick: () => act(c.token, { action: c.status === 'revoked' ? 'restore' : 'revoke' }) }, c.status === 'revoked' ? 'Restore' : 'Revoke'),
+            h('button', { class: 'btn sm danger', onclick: async () => { if (!confirm('Delete this cloud config? The link stops working.')) return; try { await api('/admin/clouds/' + c.token, { method: 'DELETE' }); loadList(); } catch (e) { toast(e.message); } } }, 'Delete')))) : h('p', { class: 'muted small' }, 'None yet.')));
+    } catch (e) { clear(list).append(h('div', { class: 'err' }, e.message)); }
+  }
+  loadList();
+}
+
 async function adminSettings(body) {
   const s = await api('/admin/settings');
   const inputs = {};
@@ -633,12 +867,13 @@ async function route() {
   if (ADMIN && !location.hash) { location.hash = '#/admin'; return; }
   const hash = location.hash || '#/';
   document.querySelectorAll('nav.main a').forEach(a => a.removeAttribute('aria-current'));
-  const key = hash.startsWith('#/tools') ? 'tools' : (ADMIN && hash.startsWith('#/admin')) ? 'admin' : 'hosts';
+  const key = hash.startsWith('#/tools') ? 'tools' : hash.startsWith('#/contact') ? 'contact' : (ADMIN && hash.startsWith('#/admin')) ? 'admin' : 'hosts';
   const navEl = document.querySelector(`nav.main a[data-nav=${key}]`);
   if (navEl) navEl.setAttribute('aria-current', 'page');
   await refreshStatus();
   if (!state.meta) return clear(app).append(h('div', { class: 'empty' }, 'Cannot reach the Moon Radar server.'));
-  if (key === 'tools') viewTools(); else if (key === 'admin') viewAdmin(); else viewHosts();
+  if (key === 'tools') viewTools(); else if (key === 'contact') viewContact(); else if (key === 'admin') viewAdmin(); else viewHosts();
+  renderFooter();
 }
 if (ADMIN && !document.querySelector('nav.main a[data-nav=admin]')) { const a = h('a', { href: '#/admin', 'data-nav': 'admin' }, 'Admin'); document.querySelector('nav.main').append(a); }
 window.addEventListener('hashchange', route);

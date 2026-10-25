@@ -111,3 +111,32 @@ table.t td,table.t th{padding:8px 6px;border-top:1px solid var(--line);text-alig
 .seg button[aria-pressed=true]{background:var(--brand);color:var(--brand-ink);border-color:var(--brand)}
 .toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:9px 16px;border-radius:99px;font-weight:600;z-index:20}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+.wa-fab{position:fixed;right:14px;bottom:88px;z-index:7;width:54px;height:54px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 14px rgba(0,0,0,.28);border:1px solid var(--line)}
+.wa-fab svg{display:block}
+@media (min-width:760px){.wa-fab{bottom:22px}}
+.wa-list{display:grid;gap:8px;margin:10px 0}
+.wa-btn{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #25D366;border-radius:10px;background:var(--surface);color:var(--ink);text-decoration:none;font-weight:600}
+.wa-btn small{display:block;font-weight:500;color:var(--muted)}
+.wa-btn:hover{background:var(--soft)}
+.wa-btn .go{margin-left:auto;color:#128C4A;font-weight:700}
+.msg-preview{white-space:pre-wrap;word-break:break-word;background:#DCF8C6;color:#0C2A3B;border-radius:10px 10px 2px 10px;padding:10px 12px;font-size:14px;margin:8px 0}
+
+footer.site{background:#0C2A3B;color:#D7E3E8;margin-top:28px;padding:26px 14px 34px;font-size:14px}
+footer.site .in{max-width:860px;margin:0 auto}
+footer.site h3{font:700 15px var(--display);color:#fff;margin:0 0 8px}
+footer.site p{margin:0 0 8px;color:#B9CBD3}
+footer.site a{color:#9DB4FF}
+footer.site .cols{display:grid;gap:22px;margin-bottom:18px}
+@media (min-width:760px){footer.site .cols{grid-template-columns:1.3fr 1fr 1.2fr}}
+footer.site ul{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+footer.site .fwa{display:flex;align-items:center;gap:8px;color:#fff;text-decoration:none;font-weight:600}
+footer.site details{border-top:1px solid #27465A;padding:10px 0}
+footer.site details:last-of-type{border-bottom:1px solid #27465A}
+footer.site summary{cursor:pointer;font-weight:600;color:#fff}
+footer.site details .body{margin-top:8px;color:#B9CBD3}
+footer.site details .body li{display:list-item;list-style:decimal;margin-left:18px}
+footer.site .q{font-weight:600;color:#fff;margin-top:10px}
+footer.site .bottom{display:flex;flex-wrap:wrap;gap:8px 16px;justify-content:space-between;margin-top:16px;color:#8FA9B4;font-size:13px}
+footer.site :focus-visible{outline-color:#9DB4FF}
+@media (max-width:759px){footer.site{padding-bottom:96px}}
